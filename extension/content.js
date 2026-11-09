@@ -46,9 +46,10 @@
     return true;
   }
 
-  // Dispatch realistic single click (fixes double-click bug & async race)
-  async function simulateClick(el) {
-    if (!el) return false;
+  // Dispatch realistic single click (fixes double-click bug & async race, pierces shadow DOM)
+  async function simulateClick(rawEl) {
+    if (!rawEl) return false;
+    const el = (rawEl.shadowRoot && rawEl.shadowRoot.querySelector('button, a, [role="button"], div, span')) || rawEl;
     try {
       el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
     } catch (_) {}
@@ -1121,13 +1122,21 @@
         return { success: res.success, message: "Speaking bypass executed", data: res };
       }
       case "eval": {
-        // Safe DOM inspection helper (only queries/reads properties)
+        // Safe DOM inspection helper (only queries/reads properties, includes shadowRoot)
         const selector = cmd.target || "body";
         const docs = getAllDocs();
         const nodes = [];
         for (const doc of docs) {
           try {
             nodes.push(...Array.from(doc.querySelectorAll(selector)));
+            const allHosts = doc.querySelectorAll("*");
+            for (const host of allHosts) {
+              if (host.shadowRoot) {
+                try {
+                  nodes.push(...Array.from(host.shadowRoot.querySelectorAll(selector)));
+                } catch (_) {}
+              }
+            }
           } catch (_) {}
         }
         return {
