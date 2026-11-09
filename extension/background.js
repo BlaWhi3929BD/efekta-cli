@@ -4,6 +4,7 @@ let ws = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
 const tabFrames = new Map(); // tabId -> Map(frameId -> { url, isLessonPlayer })
+const tabActiveFrames = new Map(); // tabId -> active frameId
 
 function log(...args) {
   console.log("[Efekta-Daemon-Bridge]", ...args);
@@ -73,49 +74,83 @@ function sendMsg(tabId, req, options = {}) {
 
 // Send command to content script with automatic iframe and frame-routing support
 async function sendMessageToTabWithRetry(tabId, req) {
-  const framesMap = tabFrames.get(tabId);
-  let lessonFrameId = null;
+  const candidateFrames = [];
 
+  // 1. Last known active frame for this tab
+  if (tabActiveFrames.has(tabId)) {
+    candidateFrames.push(tabActiveFrames.get(tabId));
+  }
+
+  // 2. Discover frames via webNavigation API if available
+  if (chrome.webNavigation && chrome.webNavigation.getAllFrames) {
+    try {
+      const allFrames = await new Promise((resolve) => {
+        chrome.webNavigation.getAllFrames({ tabId }, resolve);
+      });
+      if (allFrames && allFrames.length > 0) {
+        const lessonFrames = allFrames.filter(
+          (f) =>
+            f.frameId !== 0 &&
+            f.url &&
+            (f.url.includes("lesson-player") || f.url.includes("study") || f.url.includes("gap"))
+        );
+        for (const lf of lessonFrames) {
+          if (!candidateFrames.includes(lf.frameId)) candidateFrames.push(lf.frameId);
+        }
+        for (const f of allFrames) {
+          if (f.frameId !== 0 && !candidateFrames.includes(f.frameId)) {
+            candidateFrames.push(f.frameId);
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // 3. Registered frames fallback
+  const framesMap = tabFrames.get(tabId);
   if (framesMap) {
     for (const [fId, info] of framesMap.entries()) {
-      if (info.isLessonPlayer || (info.url && (info.url.includes("lesson-player") || info.url.includes("gap")))) {
-        if (fId !== 0) {
-          lessonFrameId = fId;
-          break;
+      if (fId !== 0 && !candidateFrames.includes(fId)) {
+        if (info.isLessonPlayer || (info.url && (info.url.includes("lesson-player") || info.url.includes("gap")))) {
+          candidateFrames.unshift(fId);
+        } else {
+          candidateFrames.push(fId);
         }
       }
     }
   }
 
-  // If a child lesson-player iframe is registered, prioritize sending to it
-  if (lessonFrameId !== null) {
-    const res = await sendMsg(tabId, req, { frameId: lessonFrameId });
+  // 4. Finally top-level frame (frameId: 0)
+  if (!candidateFrames.includes(0)) {
+    candidateFrames.push(0);
+  }
+
+  // Try each candidate frame
+  let lastError = "No frames available";
+  for (const fId of candidateFrames) {
+    const res = await sendMsg(tabId, req, { frameId: fId });
     if (res && res.success) {
-      if (req.action !== "status" || (res.data && res.data.elementsCount > 0)) {
+      if (req.action === "status") {
+        if (res.data && res.data.elementsCount > 0) {
+          tabActiveFrames.set(tabId, fId);
+          return res;
+        }
+      } else {
+        tabActiveFrames.set(tabId, fId);
         return res;
       }
+    } else if (res && res.error) {
+      lastError = res.error;
     }
   }
 
-  // Send to top-level frame (frameId: 0)
-  let res = await sendMsg(tabId, req, { frameId: 0 });
-  if (res && res.success && (req.action !== "status" || (res.data && res.data.elementsCount > 0))) {
-    return res;
+  // Fallback for status: if no frame had elements, try top-level frame status
+  if (req.action === "status") {
+    const res = await sendMsg(tabId, req, { frameId: 0 });
+    if (res && res.success) return res;
   }
 
-  // If status returned 0 elements, check any other registered child frames
-  if (framesMap && req.action === "status") {
-    for (const [fId] of framesMap.entries()) {
-      if (fId !== 0 && fId !== lessonFrameId) {
-        const childRes = await sendMsg(tabId, req, { frameId: fId });
-        if (childRes && childRes.success && childRes.data && childRes.data.elementsCount > 0) {
-          return childRes;
-        }
-      }
-    }
-  }
-
-  return res;
+  return { success: false, error: lastError };
 }
 
 function connectDaemon() {

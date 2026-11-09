@@ -100,6 +100,13 @@
       el.dispatchEvent(new MouseEvent("click", upInit));
     }
 
+    if (rawEl !== el) {
+      try {
+        if (typeof rawEl.click === "function") rawEl.click();
+        rawEl.dispatchEvent(new MouseEvent("click", upInit));
+      } catch (_) {}
+    }
+
     return true;
   }
 
@@ -399,68 +406,83 @@
   function resolveElement(target) {
     if (!target) return null;
 
-    if (elementRegistry.has(target)) {
-      const el = elementRegistry.get(target);
-      if (el && (el.isConnected || (el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)))) {
-        return el;
+    function findOnce() {
+      if (elementRegistry.has(target)) {
+        const el = elementRegistry.get(target);
+        if (el && (el.isConnected || (el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)))) {
+          return el;
+        }
       }
-    }
 
-    const docs = getAllDocs();
+      const docs = getAllDocs();
 
-    // Lookup via persistent data attribute (including shadow roots)
-    for (const doc of docs) {
-      try {
-        const byAttr = doc.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
-        if (byAttr) return byAttr;
-        const allHosts = doc.querySelectorAll("*");
-        for (const host of allHosts) {
-          if (host.shadowRoot) {
-            const inner = host.shadowRoot.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
-            if (inner) return inner;
+      // Lookup via persistent data attribute (including shadow roots)
+      for (const doc of docs) {
+        try {
+          const byAttr = doc.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
+          if (byAttr) return byAttr;
+          const allHosts = doc.querySelectorAll("*");
+          for (const host of allHosts) {
+            if (host.shadowRoot) {
+              const inner = host.shadowRoot.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
+              if (inner) return inner;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Coordinate lookup "x,y"
+      if (typeof target === "string" && /^\d+\s*,\s*\d+$/.test(target.trim())) {
+        const [x, y] = target.split(",").map((s) => Number(s.trim()));
+        if (!isNaN(x) && !isNaN(y)) {
+          for (const doc of docs) {
+            const el = doc.elementFromPoint(x, y);
+            if (el) return el;
           }
         }
-      } catch (_) {}
-    }
-
-    // Coordinate lookup "x,y"
-    if (typeof target === "string" && /^\d+\s*,\s*\d+$/.test(target.trim())) {
-      const [x, y] = target.split(",").map((s) => Number(s.trim()));
-      if (!isNaN(x) && !isNaN(y)) {
-        for (const doc of docs) {
-          const el = doc.elementFromPoint(x, y);
-          if (el) return el;
-        }
       }
+
+      // CSS selector lookup
+      for (const doc of docs) {
+        try {
+          const bySelector = doc.querySelector(target);
+          if (bySelector) return bySelector;
+          const allHosts = doc.querySelectorAll("*");
+          for (const host of allHosts) {
+            if (host.shadowRoot) {
+              const inner = host.shadowRoot.querySelector(target);
+              if (inner) return inner;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Text content match fallback
+      const needle = target.trim().toLowerCase();
+      for (const doc of docs) {
+        const candidates = Array.from(
+          doc.querySelectorAll("button, [role='button'], a, label, li, div, span, ef-lesson-overview-step")
+        );
+        const exact = candidates.find(
+          (e) => isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase() === needle
+        );
+        if (exact) return exact;
+
+        const partial = candidates.find(
+          (e) =>
+            isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase().includes(needle)
+        );
+        if (partial) return partial;
+      }
+      return null;
     }
 
-    // CSS selector lookup
-    for (const doc of docs) {
-      try {
-        const bySelector = doc.querySelector(target);
-        if (bySelector) return bySelector;
-      } catch (_) {}
-    }
+    const firstTry = findOnce();
+    if (firstTry) return firstTry;
 
-    // Text content match fallback
-    const needle = target.trim().toLowerCase();
-    for (const doc of docs) {
-      const candidates = Array.from(
-        doc.querySelectorAll("button, [role='button'], a, label, li, div, span")
-      );
-      const exact = candidates.find(
-        (e) => isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase() === needle
-      );
-      if (exact) return exact;
-
-      const partial = candidates.find(
-        (e) =>
-          isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase().includes(needle)
-      );
-      if (partial) return partial;
-    }
-
-    return null;
+    // Element not found - re-index DOM and retry (handles dynamic re-renders and virtual ID queries)
+    inspectState();
+    return findOnce();
   }
 
   // Extract visible media status (Video & Audio)
