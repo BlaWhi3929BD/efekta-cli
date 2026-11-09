@@ -96,72 +96,7 @@ func execCommand(cmd protocol.Command) (*protocol.Response, error) {
 
 // ParseBatchString parses a semicolon-separated chain of commands into BatchSubCommands.
 func ParseBatchString(batchStr string) []protocol.BatchSubCommand {
-	var subs []protocol.BatchSubCommand
-	parts := strings.Split(batchStr, ";")
-	for _, raw := range parts {
-		item := strings.TrimSpace(raw)
-		if item == "" {
-			continue
-		}
-		tokens := strings.Fields(item)
-		if len(tokens) == 0 {
-			continue
-		}
-		act := strings.ToLower(tokens[0])
-		switch act {
-		case "click":
-			if len(tokens) >= 2 {
-				subs = append(subs, protocol.BatchSubCommand{Action: "click", Target: tokens[1]})
-			}
-		case "drag":
-			if len(tokens) >= 3 {
-				subs = append(subs, protocol.BatchSubCommand{Action: "drag", Source: tokens[1], Target: tokens[2]})
-			}
-		case "type":
-			if len(tokens) >= 3 {
-				text := strings.Join(tokens[2:], " ")
-				text = strings.Trim(text, "\"'")
-				subs = append(subs, protocol.BatchSubCommand{Action: "type", Target: tokens[1], Text: text})
-			}
-		case "press", "key":
-			if len(tokens) >= 2 {
-				subs = append(subs, protocol.BatchSubCommand{Action: "press", Target: tokens[1]})
-			}
-		case "scroll":
-			dir := "down"
-			amt := 400
-			if len(tokens) >= 2 {
-				if tokens[1] == "up" || tokens[1] == "down" {
-					dir = tokens[1]
-				} else if n, err := strconv.Atoi(tokens[1]); err == nil {
-					amt = n
-				}
-			}
-			subs = append(subs, protocol.BatchSubCommand{Action: "scroll", Direction: dir, Amount: amt})
-		case "wait", "sleep":
-			if len(tokens) >= 2 {
-				if ms, err := strconv.Atoi(tokens[1]); err == nil && ms > 0 {
-					subs = append(subs, protocol.BatchSubCommand{Action: "sleep", DelayMs: ms, Target: tokens[1]})
-				} else {
-					subs = append(subs, protocol.BatchSubCommand{Action: "wait", Target: tokens[1]})
-				}
-			}
-		case "solve":
-			strat := "choice"
-			if len(tokens) >= 2 {
-				strat = strings.ToLower(tokens[1])
-			}
-			switch strat {
-			case "sentence", "order":
-				subs = append(subs, protocol.BatchSubCommand{Action: "solve_sentence"})
-			case "speak", "voice":
-				subs = append(subs, protocol.BatchSubCommand{Action: "skip_speaking"})
-			default:
-				subs = append(subs, protocol.BatchSubCommand{Action: "solve_choice"})
-			}
-		}
-	}
-	return subs
+	return protocol.ParseBatchString(batchStr)
 }
 
 func printHelp() {
@@ -497,8 +432,14 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 			fmt.Println("Daemon PID file not found, may already be stopped.")
 			return
 		}
+		if !isDaemonRunning() {
+			daemon.RemovePID()
+			fmt.Println("Daemon was not running (cleaned up stale PID file).")
+			return
+		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 		if err != nil {
+			daemon.RemovePID()
 			fmt.Println("Invalid PID in file.")
 			return
 		}

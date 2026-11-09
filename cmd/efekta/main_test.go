@@ -5,14 +5,14 @@ import (
 )
 
 func TestParseBatchString(t *testing.T) {
-	input := `click opt-1; wait 120; drag item-1 slot-2; type input-1 "goes to work"; press Enter; scroll down; wait video-end; solve choice`
+	input := `click "Start Lesson"; wait 120; drag item-1 slot-2; type input-1 "goes to work"; press Enter; scroll down; wait video-end; solve choice`
 	cmds := ParseBatchString(input)
 
 	if len(cmds) != 8 {
 		t.Fatalf("expected 8 parsed batch commands, got %d: %+v", len(cmds), cmds)
 	}
 
-	if cmds[0].Action != "click" || cmds[0].Target != "opt-1" {
+	if cmds[0].Action != "click" || cmds[0].Target != "Start Lesson" {
 		t.Errorf("unexpected cmd[0]: %+v", cmds[0])
 	}
 	if cmds[1].Action != "sleep" || cmds[1].DelayMs != 120 {
