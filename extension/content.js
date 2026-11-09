@@ -558,6 +558,10 @@
       if (!isVisible(el)) continue;
 
       const tag = el.tagName.toLowerCase();
+      if (tag === "body" || tag === "html" || tag === "head" || tag === "ol" || tag === "ul" || tag === "form") {
+        continue;
+      }
+
       const role = (el.getAttribute("role") || "").toLowerCase();
       const cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
       const testId = (el.getAttribute("data-testid") || "").toLowerCase();
@@ -588,12 +592,15 @@
       // Skip child spans/divs if an interactive parent is already registered (unless child is an input/button itself)
       let hasRegisteredParent = false;
       let parent = el.parentElement;
-      while (parent && parent !== document.body) {
+      while (parent && parent.tagName && parent.tagName.toLowerCase() !== "body" && parent.tagName.toLowerCase() !== "html") {
         if (registeredNodes.has(parent)) {
-          if (tag !== "input" && tag !== "textarea" && tag !== "button") {
-            hasRegisteredParent = true;
+          const pTag = parent.tagName.toLowerCase();
+          if (pTag !== "ol" && pTag !== "ul" && !parent.className.includes("list")) {
+            if (tag !== "input" && tag !== "textarea" && tag !== "button") {
+              hasRegisteredParent = true;
+              break;
+            }
           }
-          break;
         }
         parent = parent.parentElement;
       }
@@ -636,8 +643,10 @@
         prefix = "mic";
       } else if (
         role === "tab" ||
+        role === "listitem" ||
+        tag === "li" ||
         cls.includes("stage") ||
-        cls.includes("step-item") ||
+        cls.includes("step") ||
         testId.includes("stage") ||
         testId.includes("step")
       ) {
@@ -658,7 +667,7 @@
         el.hasAttribute("data-rbd-droppable-id") ||
         cls.includes("slot") ||
         cls.includes("blank") ||
-        cls.includes("gap") ||
+        (/\b(gap|fill-gap)\b/.test(cls) && !cls.includes("gap-b2s")) ||
         cls.includes("drop") ||
         cls.includes("column") ||
         cls.includes("category") ||
