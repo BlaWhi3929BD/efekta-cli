@@ -2,10 +2,13 @@ package mcp
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 
 	"efekta-cli/pkg/protocol"
 )
@@ -46,7 +49,6 @@ func ServeStdio(execFn CommandExecutor) error {
 // ServeStream runs the MCP loop on arbitrary io.Reader / io.Writer (testable)
 func ServeStream(in io.Reader, out io.Writer, execFn CommandExecutor) error {
 	scanner := bufio.NewScanner(in)
-	// Allow up to 10MB messages
 	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	enc := json.NewEncoder(out)
 
@@ -61,7 +63,6 @@ func ServeStream(in io.Reader, out io.Writer, execFn CommandExecutor) error {
 			continue
 		}
 
-		// Notifications have no ID and expect no response
 		if len(req.ID) == 0 || string(req.ID) == "null" {
 			continue
 		}
@@ -85,7 +86,7 @@ func handleRPC(req rpcRequest, execFn CommandExecutor) rpcResponse {
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    "efekta-cli-mcp",
-					"version": "2.0.0",
+					"version": "2.1.0",
 				},
 			},
 		}
@@ -157,7 +158,7 @@ func getToolDefinitions() []map[string]interface{} {
 				"properties": map[string]interface{}{
 					"target": map[string]interface{}{
 						"type":        "string",
-						"description": "Element virtual ID (e.g. opt-1, next-1), CSS selector, or x,y coordinates",
+						"description": "Element virtual ID (e.g. opt-1, next-1), CSS selector, text, or x,y coordinates",
 					},
 				},
 				"required": []string{"target"},
@@ -165,7 +166,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_drag",
-			"description": "Drag a word/card/block (e.g. 'item-1') to a target slot or category column (e.g. 'slot-1'). Wait ~300ms between categorization drags so Efekta's UI commits the card.",
+			"description": "Drag a word/card/block (e.g. 'item-1') to a target slot or category column (e.g. 'slot-1'). Wait ~450ms between categorization drags so Efekta's UI commits the card.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -183,7 +184,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_type",
-			"description": "Type text into a fill-in-the-blank input or contenteditable gap (e.g. 'input-1'). Wait ~300ms between filling multiple inputs so Efekta does not reset progress.",
+			"description": "Type text into a fill-in-the-blank input or contenteditable gap (e.g. 'input-1'). Wait ~350ms between filling multiple inputs so Efekta does not reset progress.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -197,6 +198,76 @@ func getToolDefinitions() []map[string]interface{} {
 					},
 				},
 				"required": []string{"target", "text"},
+			},
+		},
+		{
+			"name":        "efekta_press",
+			"description": "Press a special keyboard key on the Efekta page (Enter, Escape, Backspace, Tab, Space, ArrowRight, ArrowLeft).",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"key": map[string]interface{}{
+						"type":        "string",
+						"description": "Key name (e.g. Enter, Backspace, Escape, Tab, Space)",
+					},
+				},
+				"required": []string{"key"},
+			},
+		},
+		{
+			"name":        "efekta_scroll",
+			"description": "Scroll the Efekta page up, down, or by a pixel offset.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"direction": map[string]interface{}{
+						"type":        "string",
+						"description": "'down', 'up', or pixel amount (e.g. '400')",
+					},
+				},
+				"required": []string{"direction"},
+			},
+		},
+		{
+			"name":        "efekta_wait",
+			"description": "Wait for a condition ('video-end' to wait until AI video avatar finishes talking, 'next' to wait until Next button unlocks, or milliseconds like '350').",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"condition": map[string]interface{}{
+						"type":        "string",
+						"description": "'video-end', 'next', or duration in milliseconds (e.g. '350')",
+					},
+				},
+				"required": []string{"condition"},
+			},
+		},
+		{
+			"name":        "efekta_eval",
+			"description": "Query DOM elements on the Efekta page by CSS selector and return their tag, virtual ID, className, and text.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"selector": map[string]interface{}{
+						"type":        "string",
+						"description": "CSS selector to query (e.g. '[class*=lesson]')",
+					},
+				},
+				"required": []string{"selector"},
+			},
+		},
+		{
+			"name":        "efekta_batch",
+			"description": "Execute a semicolon-separated sequence of commands in one roundtrip (e.g. 'type input-1 goes; wait 350; type input-2 work; wait 350; click next-1'). Supports click, drag, type, press, scroll, wait, solve.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"commands": map[string]interface{}{
+						"type":        "string",
+						"description": "Semicolon-separated command chain",
+					},
+				},
+				"required": []string{"commands"},
 			},
 		},
 		{
@@ -215,17 +286,16 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 		{
-			"name":        "efekta_wait",
-			"description": "Wait for a condition ('video-end' to wait until AI video avatar finishes talking, 'next' to wait until Next button unlocks, or milliseconds like '500').",
+			"name":        "efekta_screenshot",
+			"description": "Capture a lossless PNG screenshot of the Efekta browser tab and save it to disk.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
-					"condition": map[string]interface{}{
+					"outputPath": map[string]interface{}{
 						"type":        "string",
-						"description": "'video-end', 'next', or duration in milliseconds (e.g. '500')",
+						"description": "File path to save the PNG screenshot (default: /tmp/efekta_screenshot.png)",
 					},
 				},
-				"required": []string{"condition"},
 			},
 		},
 	}
@@ -249,8 +319,23 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		cmd = protocol.Command{Action: "drag", Source: strArg("source"), Target: strArg("target")}
 	case "efekta_type":
 		cmd = protocol.Command{Action: "type", Target: strArg("target"), Text: strArg("text")}
+	case "efekta_press":
+		cmd = protocol.Command{Action: "press", Target: strArg("key")}
+	case "efekta_scroll":
+		dir := strArg("direction")
+		amt := 400
+		if n, err := strconv.Atoi(dir); err == nil {
+			amt = n
+			dir = "down"
+		}
+		cmd = protocol.Command{Action: "scroll", Direction: dir, Amount: amt}
 	case "efekta_wait":
 		cmd = protocol.Command{Action: "wait", Target: strArg("condition")}
+	case "efekta_eval":
+		cmd = protocol.Command{Action: "eval", Target: strArg("selector")}
+	case "efekta_batch":
+		subCmds := protocol.ParseBatchString(strArg("commands"))
+		cmd = protocol.Command{Action: "batch", Commands: subCmds}
 	case "efekta_solve":
 		strat := strArg("strategy")
 		switch strat {
@@ -261,6 +346,35 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		default:
 			cmd = protocol.Command{Action: "solve_choice"}
 		}
+	case "efekta_screenshot":
+		outPath := strArg("outputPath")
+		if outPath == "" {
+			outPath = filepath.Join(os.TempDir(), "efekta_screenshot.png")
+		}
+		resp, err := execFn(protocol.Command{Action: "screenshot"})
+		if err != nil {
+			return fmt.Sprintf("Error: %v", err), true
+		}
+		if !resp.Success {
+			return fmt.Sprintf("Error: %s", resp.Error), true
+		}
+		dataMap, ok := resp.Data.(map[string]interface{})
+		if !ok || dataMap["screenshotBase64"] == nil {
+			return "Error: no screenshot data returned", true
+		}
+		imgBytes, err := base64.StdEncoding.DecodeString(fmt.Sprintf("%v", dataMap["screenshotBase64"]))
+		if err != nil {
+			return fmt.Sprintf("Error decoding screenshot: %v", err), true
+		}
+		if err := os.WriteFile(outPath, imgBytes, 0644); err != nil {
+			return fmt.Sprintf("Error saving screenshot: %v", err), true
+		}
+		b, _ := json.MarshalIndent(map[string]interface{}{
+			"success": true,
+			"path":    outPath,
+			"bytes":   len(imgBytes),
+		}, "", "  ")
+		return string(b), false
 	default:
 		return fmt.Sprintf("Unknown tool: %s", params.Name), true
 	}
