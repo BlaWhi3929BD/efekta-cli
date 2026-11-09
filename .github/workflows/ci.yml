@@ -24,5 +24,7 @@ jobs:
       - name: Run tests
         run: go test -v ./...
 
-      - name: Build binary
-        run: go build -v ./cmd/efekta
+      - name: Build static binary (CGO_ENABLED=0)
+        env:
+          CGO_ENABLED: '0'
+        run: go build -trimpath -ldflags="-s -w" -v ./cmd/efekta
