@@ -27,7 +27,8 @@
     {
       "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
       "js": ["content.js"],
-      "run_at": "document_start"
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "web_accessible_resources": [

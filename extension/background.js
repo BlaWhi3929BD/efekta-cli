@@ -139,6 +139,22 @@ function connectDaemon() {
           return;
         }
 
+        if (action === "reload_tab") {
+          await chrome.tabs.reload(tab.id);
+          ws.send(JSON.stringify({ id: reqId, success: true, message: "Efekta tab reloaded" }));
+          return;
+        }
+
+        if (action === "reload_extension") {
+          ws.send(JSON.stringify({ id: reqId, success: true, message: "Extension reloading..." }));
+          setTimeout(() => {
+            if (chrome.runtime && chrome.runtime.reload) {
+              chrome.runtime.reload();
+            }
+          }, 60);
+          return;
+        }
+
         if (action === "screenshot") {
           try {
             if (!tab.active && chrome.tabs && chrome.tabs.update) {

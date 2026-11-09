@@ -368,65 +368,98 @@
     return true;
   }
 
+  // Helper to gather all accessible documents (top-level window + same-origin iframes)
+  function getAllDocs() {
+    const docs = [document];
+    try {
+      const iframes = Array.from(document.querySelectorAll("iframe"));
+      for (const frame of iframes) {
+        try {
+          if (frame.contentDocument && frame.contentDocument.body) {
+            docs.push(frame.contentDocument);
+          }
+        } catch (_) {}
+      }
+    } catch (_) {}
+    return docs;
+  }
+
   // Resolve element by virtual ID, data-efekta-id, coordinates "x,y", CSS selector, or exact text
   function resolveElement(target) {
     if (!target) return null;
 
     if (elementRegistry.has(target)) {
       const el = elementRegistry.get(target);
-      if (el && document.body && document.body.contains(el)) return el;
+      if (el && el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)) return el;
     }
 
+    const docs = getAllDocs();
+
     // Lookup via persistent data attribute
-    try {
-      const byAttr = document.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
-      if (byAttr) return byAttr;
-    } catch (_) {}
+    for (const doc of docs) {
+      try {
+        const byAttr = doc.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
+        if (byAttr) return byAttr;
+      } catch (_) {}
+    }
 
     // Coordinate lookup "x,y"
     if (typeof target === "string" && /^\d+\s*,\s*\d+$/.test(target.trim())) {
       const [x, y] = target.split(",").map((s) => Number(s.trim()));
       if (!isNaN(x) && !isNaN(y)) {
-        return document.elementFromPoint(x, y);
+        for (const doc of docs) {
+          const el = doc.elementFromPoint(x, y);
+          if (el) return el;
+        }
       }
     }
 
     // CSS selector lookup
-    try {
-      const bySelector = document.querySelector(target);
-      if (bySelector) return bySelector;
-    } catch (_) {}
+    for (const doc of docs) {
+      try {
+        const bySelector = doc.querySelector(target);
+        if (bySelector) return bySelector;
+      } catch (_) {}
+    }
 
     // Text content match fallback
     const needle = target.trim().toLowerCase();
-    const candidates = Array.from(
-      document.querySelectorAll("button, [role='button'], a, label, li, div, span")
-    );
-    const exact = candidates.find(
-      (e) => isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase() === needle
-    );
-    if (exact) return exact;
+    for (const doc of docs) {
+      const candidates = Array.from(
+        doc.querySelectorAll("button, [role='button'], a, label, li, div, span")
+      );
+      const exact = candidates.find(
+        (e) => isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase() === needle
+      );
+      if (exact) return exact;
 
-    return (
-      candidates.find(
+      const partial = candidates.find(
         (e) =>
           isVisible(e) && (e.innerText || e.textContent || "").trim().toLowerCase().includes(needle)
-      ) || null
-    );
+      );
+      if (partial) return partial;
+    }
+
+    return null;
   }
 
   // Extract visible media status (Video & Audio)
   function getMediaStatus() {
-    const videos = Array.from(document.querySelectorAll("video"));
-    const audios = Array.from(document.querySelectorAll("audio"));
-    const mediaList = [...videos, ...audios];
-    if (!mediaList.length) {
-      return { hasVideo: false, isPlaying: false, paused: true, ended: true, currentTime: 0, duration: 0 };
+    const docs = getAllDocs();
+    const mediaList = [];
+    for (const doc of docs) {
+      mediaList.push(...Array.from(doc.querySelectorAll("video")));
+      mediaList.push(...Array.from(doc.querySelectorAll("audio")));
     }
-    const active = mediaList.find((m) => !m.paused && !m.ended) || videos[0] || audios[0];
+    if (!mediaList.length) {
+      return { hasVideo: false, hasAudio: false, isPlaying: false, paused: true, ended: true, currentTime: 0, duration: 0 };
+    }
+    const active = mediaList.find((m) => !m.paused && !m.ended) || mediaList[0];
+    const hasVideo = mediaList.some((m) => m.tagName.toLowerCase() === "video");
+    const hasAudio = mediaList.some((m) => m.tagName.toLowerCase() === "audio");
     return {
-      hasVideo: videos.length > 0,
-      hasAudio: audios.length > 0,
+      hasVideo,
+      hasAudio,
       paused: !!active.paused,
       ended: !!active.ended,
       currentTime: Number((active.currentTime || 0).toFixed(2)),
@@ -438,11 +471,14 @@
   // Build rich semantic page state for AI agents
   function inspectState() {
     elementRegistry.clear();
-    try {
-      document
-        .querySelectorAll("[data-efekta-id]")
-        .forEach((n) => n.removeAttribute("data-efekta-id"));
-    } catch (_) {}
+    const docs = getAllDocs();
+    for (const doc of docs) {
+      try {
+        doc
+          .querySelectorAll("[data-efekta-id]")
+          .forEach((n) => n.removeAttribute("data-efekta-id"));
+      } catch (_) {}
+    }
 
     const counters = {
       opt: 1,
@@ -488,15 +524,17 @@
       "[class*='step']"
     ].join(",");
 
-    const rawSet = new Set(document.querySelectorAll(interactiveSelectors));
-    // Also discover CSS-in-JS / Tailwind obfuscated interactive elements via computed cursor: pointer
-    const pointerCandidates = document.querySelectorAll("div, span, li, label");
-    for (const node of pointerCandidates) {
-      if (rawSet.has(node)) continue;
-      const r = node.getBoundingClientRect();
-      if (r.width >= 20 && r.width <= 700 && r.height >= 18 && r.height <= 220) {
-        if (window.getComputedStyle(node).cursor === "pointer") {
-          rawSet.add(node);
+    const rawSet = new Set();
+    for (const doc of docs) {
+      doc.querySelectorAll(interactiveSelectors).forEach((el) => rawSet.add(el));
+      const pointerCandidates = doc.querySelectorAll("div, span, li, label");
+      for (const node of pointerCandidates) {
+        if (rawSet.has(node)) continue;
+        const r = node.getBoundingClientRect();
+        if (r.width >= 20 && r.width <= 700 && r.height >= 18 && r.height <= 220) {
+          if (window.getComputedStyle(node).cursor === "pointer") {
+            rawSet.add(node);
+          }
         }
       }
     }
@@ -672,22 +710,32 @@
     }
 
     // Extract task prompt / instructions
-    const promptCandidates = Array.from(
-      document.querySelectorAll(
-        "h1, h2, h3, [class*='prompt'], [class*='instruction'], [class*='question'], [class*='rubric'], [class*='header-title']"
-      )
-    )
-      .filter(isVisible)
-      .map((e) => (e.innerText || e.textContent || "").trim().replace(/\s+/g, " "))
-      .filter((t) => t.length > 2 && t.length < 300);
+    const promptCandidates = [];
+    for (const doc of docs) {
+      promptCandidates.push(
+        ...Array.from(
+          doc.querySelectorAll(
+            "h1, h2, h3, [class*='prompt'], [class*='instruction'], [class*='question'], [class*='rubric'], [class*='header-title']"
+          )
+        )
+          .filter(isVisible)
+          .map((e) => (e.innerText || e.textContent || "").trim().replace(/\s+/g, " "))
+          .filter((t) => t.length > 2 && t.length < 300)
+      );
+    }
     const prompt = Array.from(new Set(promptCandidates)).slice(0, 3).join(" | ");
 
     // Extract context sentences (including inline placeholders for inputs/blanks so AI knows sentence context!)
-    const contextNodes = Array.from(
-      document.querySelectorAll(
-        "p, [class*='sentence'], [class*='passage'], [class*='dialogue'], [class*='transcript'], [class*='phrase'], [class*='statement'], [class*='question-text']"
-      )
-    ).filter(isVisible);
+    const contextNodes = [];
+    for (const doc of docs) {
+      contextNodes.push(
+        ...Array.from(
+          doc.querySelectorAll(
+            "p, [class*='sentence'], [class*='passage'], [class*='dialogue'], [class*='transcript'], [class*='phrase'], [class*='statement'], [class*='question-text']"
+          )
+        ).filter(isVisible)
+      );
+    }
 
     const contextLines = [];
     const seenContext = new Set();
@@ -717,11 +765,16 @@
 
     // Detect feedback (correct / incorrect / completed)
     let feedback = "";
-    const feedbackEls = Array.from(
-      document.querySelectorAll(
-        "[class*='feedback'], [class*='correct'], [class*='incorrect'], [class*='error'], [class*='success'], [role='alert'], [class*='result'], [class*='modal']"
-      )
-    ).filter(isVisible);
+    const feedbackEls = [];
+    for (const doc of docs) {
+      feedbackEls.push(
+        ...Array.from(
+          doc.querySelectorAll(
+            "[class*='feedback'], [class*='correct'], [class*='incorrect'], [class*='error'], [class*='success'], [role='alert'], [class*='result'], [class*='modal']"
+          )
+        ).filter(isVisible)
+      );
+    }
     for (const f of feedbackEls) {
       const fText = (f.innerText || f.textContent || "").trim().replace(/\s+/g, " ");
       const fCls = (typeof f.className === "string" ? f.className : "").toLowerCase();
@@ -1051,14 +1104,22 @@
       case "eval": {
         // Safe DOM inspection helper (only queries/reads properties)
         const selector = cmd.target || "body";
-        const nodes = Array.from(document.querySelectorAll(selector)).slice(0, 50);
+        const docs = getAllDocs();
+        const nodes = [];
+        for (const doc of docs) {
+          try {
+            nodes.push(...Array.from(doc.querySelectorAll(selector)));
+          } catch (_) {}
+        }
         return {
           success: true,
-          data: nodes.map((n) => ({
+          data: nodes.slice(0, 50).map((n) => ({
             tag: n.tagName.toLowerCase(),
             id: n.getAttribute("data-efekta-id") || n.id || "",
             className: (typeof n.className === "string" ? n.className : "").slice(0, 80),
-            text: (n.innerText || n.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200)
+            text: (n.innerText || n.textContent || "").trim().replace(/\s+/g, " ").slice(0, 200),
+            src: n.getAttribute("src") || "",
+            href: n.getAttribute("href") || ""
           }))
         };
       }
