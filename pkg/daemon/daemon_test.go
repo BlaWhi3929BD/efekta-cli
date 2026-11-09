@@ -77,11 +77,17 @@ func TestConcurrentWebSocketCommandsAndMultiBrowserRouting(t *testing.T) {
 	defer ts.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	dialer := websocket.Dialer{
+		NetDialContext: (&http.Transport{}).DialContext,
+	}
+	testHTTPClient := &http.Client{
+		Transport: &http.Transport{},
+	}
 
 	// Connect Browser 1 (no Efekta tab open)
 	header := http.Header{}
 	header.Set("Origin", "chrome-extension://browser1")
-	conn1, _, err := websocket.DefaultDialer.Dial(wsURL, header)
+	conn1, _, err := dialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatalf("failed to connect browser 1: %v", err)
 	}
@@ -95,7 +101,7 @@ func TestConcurrentWebSocketCommandsAndMultiBrowserRouting(t *testing.T) {
 	// Connect Browser 2 (has Efekta tab open!)
 	header2 := http.Header{}
 	header2.Set("Origin", "moz-extension://browser2")
-	conn2, _, err := websocket.DefaultDialer.Dial(wsURL, header2)
+	conn2, _, err := dialer.Dial(wsURL, header2)
 	if err != nil {
 		t.Fatalf("failed to connect browser 2: %v", err)
 	}
@@ -142,7 +148,7 @@ func TestConcurrentWebSocketCommandsAndMultiBrowserRouting(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set(ClientHeader, ClientValue)
 
-			resp, err := http.DefaultClient.Do(req)
+			resp, err := testHTTPClient.Do(req)
 			if err != nil {
 				errCh <- err
 				return

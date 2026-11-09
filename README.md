@@ -51,32 +51,26 @@ go build -o bin/efekta ./cmd/efekta
 
 ---
 
-## CLI Usage & Commands
+## CLI Usage & Turbo Commands (1-Command-Per-Screen)
 
 ```bash
-# Inspect current exercise, prompt, context sentences, and element IDs
-efekta status --json
+# Inspect current exercise with Compact Mode (-c saves 80% tokens & highlights agentHint)
+efekta status --json -c
 
-# Click an option, button, stage tab, or coordinate
-efekta click opt-1
-efekta click next-1
+# Auto-advance & fast-forward through all consecutive passive/reading/summary screens
+efekta next --json -c
 
-# Drag and drop words/cards into slots or category columns
-efekta drag item-1 slot-1
+# 1-Shot Matching Pairs + Auto-Advance
+efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
 
-# Type into fill-in-the-blank inputs (React & contenteditable compatible)
-efekta type input-1 "goes"
+# 1-Shot Category Sorting (immune to DOM removal) + Auto-Advance
+efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
 
-# Press keyboard keys (Enter, Backspace, Escape, Tab, Space)
-efekta press Enter
+# 1-Shot Selection-Gap Drawer / Blank Filling + Auto-Advance
+efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
 
-# Wait for avatar video to finish speaking, Next button unlock, or ms delay
-efekta wait video-end
-efekta wait next
-efekta wait 350
-
-# Execute a sequence of actions in one roundtrip
-efekta batch "type input-1 goes; wait 350; type input-2 work; wait 350; click next-1" --json
+# 1-Shot Multi-Select or Sentence Reordering + Auto-Advance
+efekta batch "pick opt-1,opt-3,opt-5; next" --json -c
 
 # Built-in smart solvers
 efekta solve choice --json     # Brute-force multiple choice options until Next unlocks
@@ -86,7 +80,7 @@ efekta solve speak --json      # Burn 3 synthetic audio attempts to unlock manua
 # Capture lossless PNG screenshot of the Efekta tab
 efekta screen -o screenshot.png
 
-# Print the full AI Agent Playbook & Efekta domain strategies
+# Print the 1-Look AI Agent Decision Matrix & Playbook
 efekta guide
 ```
 

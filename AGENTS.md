@@ -1,90 +1,79 @@
-# AGENTS.md — AI Agent Instructions for `efekta-cli`
+# AGENTS.md — Efekta Turbo Playbook (1-Command-Per-Screen Protocol)
 
-This repository provides **`efekta`**, an ultra-fast CLI & Model Context Protocol (MCP) server for AI agents to inspect and automatically complete English lessons on `learn.better.efekta.com`.
+This repository provides **`efekta` v2.2 (Turbo Engine)**, an ultra-fast CLI & MCP server for AI agents to inspect and complete English lessons on `learn.better.efekta.com` in **1 command per interactive exercise**.
 
 ---
 
-## 1. How AI Agents Connect to Efekta
+## 0. The 4 Golden Laws of Speed (Memorize These!)
 
-You have two ways to interact with the browser where `learn.better.efekta.com` is open:
-1. **Direct CLI execution (fastest, < 5ms overhead):**
-   Run `efekta <command> --json` in the terminal.
-2. **Model Context Protocol (MCP stdio server):**
-   Configure `efekta mcp` in your MCP client (`claude_desktop_config.json`, `.cursor/mcp.json`, Windsurf, Cline, Codex, Antigravity).
+1. **NEVER call `wait` or `status` manually between exercises:**
+   Every `batch`, `next`, `pick`, `pair`, `sort`, and `gaps` command **automatically waits** for Efekta's UI locks (`.locked`, `.item-disabled`, animations) AND **returns the fresh page state** in `data`!
+2. **ALWAYS end every exercise `batch` with `; next`:**
+   Appending `; next` clicks the Next button AND **automatically fast-forwards through all consecutive passive screens** (reading cards, `"Correct answers"` review screens, `"Step passed!"` summaries, and Lesson Overviews) until the browser lands on the next interactive exercise! Any passive reading text traversed along the way is returned in `data.autoReadNotes`.
+3. **ALWAYS pass `--json -c` (Compact Mode) and read `agentHint` FIRST:**
+   `--json -c` strips the raw `elements` coordinate dump (saving **80% tokens**) while keeping `data.agentHint`, which gives you:
+   - `exerciseType`
+   - `actionTemplate` (ready-to-fill command!)
+   - `slots`, `items`, `options`, `inputs` (clean, deduplicated `id: text` lists)
+4. **NEVER do voice recording in Stages 1–5:**
+   If a non-final stage shows a microphone with a `SKIP` button (`skip-1`), skip it in 1 command:
+   ```bash
+   efekta batch "click skip-1; next" --json -c
+   ```
 
-If you ever need a refresher on commands or Efekta heuristics, run:
+---
+
+## 1. Instant Decision Matrix (See `exerciseType` -> Run 1 Command)
+
+Look at `data.agentHint.exerciseType` from your last response and immediately run the matching **single command**:
+
+| `exerciseType` | What You See in `agentHint` | Single Command to Execute |
+| :--- | :--- | :--- |
+| `passive_screen` / `lesson_overview` | `canProceed: true` or `stage-1..stage-N` | `efekta next --json -c` |
+| `multiple_choice` (1 answer) | `options: ["opt-1: ...", "opt-2: ..."]` | `efekta batch "pick opt-2; next" --json -c` *(or `efekta batch "solve choice; next" --json -c`)* |
+| `multiple_choice` (multi-select) | Prompt says *"Choose three"* + `options` | `efekta batch "pick opt-1,opt-3,opt-5; next" --json -c` |
+| `matching_pairs` | `slots: ["slot-1: ..."]` + `items: ["item-1: ..."]` | `efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c` |
+| `categorize_columns` | 2 category `slots` + N draggable `items` | `efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c` |
+| `selection_gaps` | `contextText` has `[slot-1]` + bottom word drawer | `efekta batch "gaps word1, word2, word3, word4, word5; next" --json -c` |
+| `fill_in_the_blanks` | `contextText` has `[input-1]` text blanks | `efekta batch "gaps answer1, answer2, answer3; next" --json -c` |
+| `order_sentence` | `items` are shuffled sentence words | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
+| `speaking_avatar` (optional) | `skip-1` exists in `elements` | `efekta batch "click skip-1; next" --json -c` |
+| `speaking_avatar` (mandatory final) | No `skip-1`; AI video human speaks | `efekta batch "wait video-end; solve speak" --json -c` -> then `efekta batch "pick opt-1; next" --json -c` |
+
+---
+
+## 2. How Each Turbo Macro Works Under the Hood
+
+### `next` / `ff` — Auto-Fast-Forward
 ```bash
-efekta guide
+efekta next --json -c
 ```
+- Clicks `next-1` (or the first incomplete `stage-N` on Lesson Overview), waits for Angular to render, and **loops up to 7 times** if the next screen is a passive reading card, `"Correct answers"` review, `"Step passed!"` celebration, or Lesson Overview.
+- Stops the instant an interactive exercise appears and returns its `agentHint` + `autoReadNotes` (all vocabulary/grammar notes collected along the way).
 
----
+### `pick` — Multi-Option / Sentence Token Selector
+```bash
+efekta batch "pick opt-1,opt-4,opt-5; next" --json -c
+```
+- Snapshots all target texts **upfront** before the first click.
+- Automatically waits for `.locked` to clear between clicks (~220ms), so multi-select checkboxes and sentence-ordering tokens never drop a click.
 
-## 2. Core CLI Commands (Always prefer `--json`)
+### `pair` — 1-Shot Matching Pairs
+```bash
+efekta batch "pair slot-1:item-4, slot-2:item-1, slot-3:item-5, slot-4:item-2, slot-5:item-3; next" --json -c
+```
+- Snapshots the text of every `slot-X` and `item-Y` **before** clicking anything.
+- Clicks each left card, waits 95ms, clicks the right card, waits for `.correct` animation, and moves to the next pair.
 
-| Command | Description |
-| :--- | :--- |
-| `efekta status --json` | Returns `exerciseType`, `prompt`, `contextText` (with inline `[input-1]` / `[slot-1]` placeholders), `feedback`, `video` state, `canProceed`, `nextButtonId`, and all interactive `elements`. |
-| `efekta click <target>` | Clicks an element by virtual ID (`opt-1`, `next-1`, `stage-4`), CSS selector, text, or `x,y` coordinates. |
-| `efekta drag <source> <target>` | Drags a word/card (`item-1`) to a slot or category column (`slot-1`). |
-| `efekta type <target> "<text>"` | Types text into a fill-in-the-blank input or contenteditable gap (`input-1`). |
-| `efekta press <key>` | Presses a keyboard key (`Enter`, `Backspace`, `Escape`, `Tab`, `Space`). |
-| `efekta wait <cond>` | Waits for milliseconds (`350`), `video-end` (avatar finishes speaking), or `next` (Next button unlocks). |
-| `efekta batch "<cmds>"` | Executes a semicolon-separated chain of commands in one roundtrip (supports `click`, `drag`, `type`, `press`, `scroll`, `wait`, `solve`). |
-| `efekta solve <strategy>` | Runs built-in solver: `choice` \| `sentence` \| `speak`. |
-| `efekta screen -o /tmp/efekta.png` | Captures a lossless PNG screenshot of the Efekta tab. |
+### `sort` — DOM-Shift-Immune Category Sorting
+```bash
+efekta batch "sort slot-1:item-1,item-3,item-5; sort slot-2:item-2,item-4,item-6; next" --json -c
+```
+- In Efekta's sorting UI, sorting `item-1` removes it from the DOM. `sort` snapshots the clean text of every item **upfront**, clicks the item, clicks the category `slot-X`, and waits for the item to leave the DOM before sorting the next one.
 
----
-
-## 3. Efekta Course Structure & Rules for Agents
-
-### Course Hierarchy
-`Level` -> `Unit` -> `Lesson` -> `Stages` (activities inside a lesson).
-
-### Rule 1: First 3 Stages Without Voice
-Inside a lesson, **the first 3 stages can be completed without microphone speech**.
-- Click the end / stage navigation indicators (`stage-N`) to check the minimum completion requirements needed to advance to the next stage.
-- Complete only the non-voice exercises required to unlock stage progression.
-
-### Rule 2: Multiple Choice (`exerciseType: "multiple_choice"`)
-- **Strategy:** Fastest and easiest task. Run:
-  ```bash
-  efekta solve choice --json
-  ```
-  Or click all choices rapidly in a batch:
-  ```bash
-  efekta batch "click opt-1; wait 90; click opt-2; wait 90; click opt-3; wait 90; click opt-4" --json
-  ```
-- Selecting the right choice immediately unlocks the Next button (`canProceed: true`).
-
-### Rule 3: Fill in the Blanks (`exerciseType: "fill_in_the_blanks"`)
-- **Strategy:** Read `prompt` and `contextText` from `efekta status --json` (blanks are marked inline as `[input-1]`, `[input-2]`).
-- **CRITICAL TIMING RULE:** Wait **300–400ms** after filling or guessing each word before filling the next blank! If you fill multiple blanks without a pause, Efekta's frontend state may reset the previous word:
-  ```bash
-  efekta batch "type input-1 goes; wait 350; type input-2 work; wait 350; click next-1" --json
-  ```
-
-### Rule 4: Sentence Reordering / Order Blocks (`exerciseType: "order_sentence"`)
-- **Strategy:** Run `efekta solve sentence --json` to get token heuristics:
-  - **First word:** Always starts with a capital letter. *(Watch out: the pronoun `"I"` is always capitalized in English—check if another capitalized word exists first!)*
-  - **Last word:** Always ends with a punctuation mark (`.`, `?`, `!`).
-  - Place words into slots (`efekta drag item-X slot-Y` or `efekta click item-X`) and observe the updated state.
-
-### Rule 5: Column Categorization (`exerciseType: "categorize_columns"`)
-- **Strategy:** Match words/expressions (`item-1`, `item-2`...) into category columns (`slot-1`, `slot-2`...).
-- **CRITICAL TIMING RULE:** Efekta's UI takes **400–500ms** to animate and commit a dragged card into a column. Random brute-force is slow here—use semantic reasoning from the column titles (`slot-1`, `slot-2`) and wait between drags:
-  ```bash
-  efekta batch "drag item-1 slot-1; wait 450; drag item-2 slot-2; wait 450" --json
-  ```
-
-### Rule 6: Speaking / AI Video Avatar Stage (`exerciseType: "speaking_avatar"`)
-- When you reach the mandatory speaking dialogue with the AI video human:
-  1. Wait for the AI avatar video to finish speaking:
-     ```bash
-     efekta wait video-end --json
-     ```
-  2. Run the 3-attempt speech bypass:
-     ```bash
-     efekta solve speak --json
-     ```
-     *How it works:* The extension hooks `navigator.mediaDevices.getUserMedia` and feeds speech-modulated synthetic audio for 3 attempts. Efekta fails to recognize the speech 3 times and **unlocks manual multiple-choice buttons (`opt-1`, `opt-2`...)**!
-  3. Pick the right answer manually with `efekta click opt-X` or `efekta solve choice`.
+### `gaps` — Automatic Drawer & Input Filler
+```bash
+efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
+```
+- Works for both **Selection-Gap Drawers** (`button.selection-gap-button` + `div.drawer-option`) and **Text Inputs** (`input-1`, `input-2`).
+- For Selection-Gap Drawers, `gaps` automatically clicks the next unfilled gap button, waits for the bottom `.drawer-option` drawer to open, clicks the matching word option, waits for the drawer to close, and repeats for every word in order!

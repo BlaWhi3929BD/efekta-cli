@@ -1,133 +1,91 @@
-# Efekta AI Agent Automation Guide (v2.0)
+# Efekta AI Agent Turbo Guide (`learn.better.efekta.com`)
 
-This guide is designed for **AI coding agents** (Claude Code, OpenAI Codex, Cursor, Windsurf, Google Antigravity, Cline, Roo Code, OpenCode, Aider) operating the `efekta` CLI or MCP server to complete English lessons on `learn.better.efekta.com`.
-
----
-
-## 1. Two Ways to Connect
-
-### Option A: Fast CLI (Recommended for Bash-capable agents)
-Run `efekta <command> --json`. The background WebSocket daemon starts automatically if not already running.
-
-### Option B: Model Context Protocol (`efekta mcp`)
-Configure `efekta mcp` as a stdio MCP server. It exposes 6 structured tools:
-- `efekta_status`
-- `efekta_click`
-- `efekta_drag`
-- `efekta_type`
-- `efekta_solve`
-- `efekta_wait`
+This guide is designed so that **any AI agent** (even slow-thinking models) can complete an entire Efekta lesson in **6–10 total CLI calls** instead of 80+ slow step-by-step calls.
 
 ---
 
-## 2. Understanding `efekta status --json`
+## 1. Why Previous Agent Execution Was Slow (And How Turbo v2.2 Solves It)
 
-```json
-{
-  "id": "req-1762692000-1",
-  "success": true,
-  "data": {
-    "url": "https://learn.better.efekta.com/...",
-    "title": "Efekta",
-    "exerciseType": "fill_in_the_blanks",
-    "prompt": "Complete the sentences with the correct form of the verb.",
-    "contextText": [
-      "She usually [input-1] to the office by train, but today she [input-2] from home."
-    ],
-    "feedback": "",
-    "video": {
-      "hasVideo": false,
-      "isPlaying": false,
-      "paused": true,
-      "ended": true,
-      "currentTime": 0,
-      "duration": 0
-    },
-    "canProceed": false,
-    "nextButtonId": "",
-    "elementsCount": 3,
-    "elements": [
-      { "id": "input-1", "type": "input", "text": "", "tag": "input", "x": 380, "y": 290, "width": 90, "height": 32, "selected": false, "disabled": false },
-      { "id": "input-2", "type": "input", "text": "", "tag": "input", "x": 610, "y": 290, "width": 90, "height": 32, "selected": false, "disabled": false },
-      { "id": "next-1", "type": "next_btn", "text": "Check", "tag": "button", "x": 820, "y": 580, "width": 110, "height": 44, "selected": false, "disabled": true }
-    ]
-  }
-}
-```
-
-### Virtual ID Prefixes
-- `opt-1, opt-2...` — Multiple-choice options / radio buttons / checkboxes
-- `item-1, item-2...` — Draggable word chips / cards / blocks
-- `slot-1, slot-2...` — Drop target slots / blank boxes / category columns
-- `input-1, input-2...` — Text inputs / textareas / contenteditable blanks
-- `next-1...` — Next / Continue / Check / Submit / Proceed buttons
-- `mic-1...` — Microphone / Record speech buttons
-- `stage-1, stage-2...` — Lesson stage navigation tabs/indicators
-- `btn-1, btn-2...` — Other interactive buttons
+| Old Bottleneck | Turbo v2.2 Solution |
+| :--- | :--- |
+| Calling `efekta status` after every click | **Every command returns the updated state (`data`) automatically.** Never call `status` after an action! |
+| Calling `click next-1` on 4 consecutive reading cards / `"Step passed!"` screens | **`next` (or `; next` at the end of a `batch`) auto-fast-forwards** through up to 7 consecutive passive screens, reading cards, `"Correct answers"` reviews, and Lesson Overviews, collecting their text in `autoReadNotes` and stopping at the next interactive exercise! |
+| Inserting manual `wait 300`, `wait 500`, `wait 1200` | **`content.js` automatically polls `waitUntilUnlocked()`** until `.locked` and `.item-disabled` clear before every click. |
+| Sorting items removed DOM nodes and shifted `opt-3` -> `opt-2` mid-batch | **`sort`, `pair`, and `pick` snapshot element texts upfront** before the first click, resolving each item by its snapshotted text even if the DOM re-renders. |
+| Opening selection-gap drawers one by one (`click slot-1` -> `status` -> `click opt-3`) | **`gaps word1, word2, word3` handles the entire screen in 1 command:** clicks each unfilled `selection-gap-button`, waits for `.drawer-option` to open, clicks the matching word, and repeats! |
+| Parsing 40+ noisy elements with duplicated screen-reader text (`"stress stress"`) | **`--json -c` (Compact Mode) + `agentHint`:** strips screen-reader duplicates, hides media player chrome, and gives you a pre-built `agentHint.actionTemplate` + clean `slots`, `items`, and `options` lists! |
 
 ---
 
-## 3. Command Reference
+## 2. The 1-Look Decision Table (Memorize This!)
 
+Always run commands with `--json -c`. Look ONLY at `data.agentHint` and `data.contextText`:
+
+### Case 1: `passive_screen` or `lesson_overview`
+When `agentHint.exerciseType` is `"passive_screen"` or `"lesson_overview"`:
 ```bash
-# Inspect current page state
-efekta status --json
+efekta next --json -c
+```
+*Result:* Clicks Next / enters the next incomplete lesson step, glides through all intro/reading cards, and stops on the first real exercise!
 
-# Click an element by virtual ID, CSS selector, exact text, or x,y coordinates
-efekta click opt-1 --json
+### Case 2: `matching_pairs` ("Tap to match")
+`agentHint` shows:
+- `slots`: `["slot-1: Reduce", "slot-2: Improve", "slot-3: Work"]`
+- `items`: `["item-1: your diet", "item-2: fewer hours", "item-3: stress"]`
 
-# Drag a draggable item to a target slot or column
-efekta drag item-1 slot-1 --json
-
-# Type text into an input or contenteditable gap
-efekta type input-1 "goes" --json
-
-# Press a keyboard key (Enter, Escape, Backspace, Tab, Space, ArrowRight...)
-efekta press Enter --json
-
-# Wait for avatar video completion, Next button unlock, or milliseconds
-efekta wait video-end --json
-efekta wait next --json
-efekta wait 350 --json
-
-# Query arbitrary DOM elements by CSS selector
-efekta eval "[class*='lesson']" --json
-
-# Chained batch execution in a single roundtrip
-efekta batch "type input-1 goes; wait 350; type input-2 is working; wait 350; click next-1" --json
-
-# Built-in smart solvers
-efekta solve choice --json
-efekta solve sentence --json
-efekta solve speak --json
-
-# Capture lossless PNG screenshot
-efekta screen -o /tmp/efekta.png --json
+Match all pairs + advance in **1 command**:
+```bash
+efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
 ```
 
----
+### Case 3: `categorize_columns` ("Sort the items")
+`agentHint` shows:
+- `slots`: `["slot-1: Good habits", "slot-2: Bad habits"]`
+- `items`: `["item-1: eat well", "item-2: work late", "item-3: exercise", "item-4: skip lunch"]`
 
-## 4. Exercise-Specific Strategies & Timing Rules
+Sort all items into both categories + advance in **1 command**:
+```bash
+efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
+```
 
-1. **First 3 Stages Without Voice:**
-   - Inside a lesson (`Level -> Unit -> Lesson -> Stages`), the first 3 stages can be completed without microphone speech.
-   - Click the end / stage navigation buttons (`stage-N`) to inspect minimum completion requirements, and complete only the non-voice tasks needed to advance.
+### Case 4: `selection_gaps` or `fill_in_the_blanks` ("Tap on the gaps...")
+`contextText` shows sentences with inline `[slot-1]` or `[input-1]` markers.
+Fill all gaps in order + advance in **1 command**:
+```bash
+efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
+```
+*(Note: If `slot-1` was already filled with `"changes"` and `slot-2..slot-6` are empty, `gaps` automatically starts at the first unfilled gap button! You can also target specific gaps explicitly: `gaps slot-2=wait, slot-3=better`.)*
 
-2. **Multiple Choice (`multiple_choice`):**
-   - Run `efekta solve choice --json`. It clicks each option with a 90ms delay (and clicks `Check` if present) until `canProceed` becomes `true`.
+### Case 5: `multiple_choice` (Single or Multi-Select)
+- **Single answer:**
+  ```bash
+  efekta batch "pick opt-2; next" --json -c
+  ```
+  *(Or brute-force unknown single choice: `efekta batch "solve choice; next" --json -c`)*
+- **Multi-select ("Choose two" / "Choose three"):**
+  ```bash
+  efekta batch "pick opt-1,opt-3,opt-5; next" --json -c
+  ```
 
-3. **Fill in the Blanks (`fill_in_the_blanks`):**
-   - Always include `wait 350` between filling consecutive blanks so Efekta's frontend state does not reset earlier blanks.
+### Case 6: `order_sentence` ("Put the words in the correct order")
+- **Capital letter rule:** First word starts with a capital letter (check non-`"I"` capitalized words first).
+- **Punctuation rule:** Last word ends with `.`, `?`, or `!`.
+Click all tokens in order + advance in **1 command**:
+```bash
+efekta batch "pick item-4,item-1,item-5,item-2,item-3; next" --json -c
+```
 
-4. **Order Sentence (`order_sentence`):**
-   - Run `efekta solve sentence --json`.
-   - First word starts with a capital letter (watch out for standalone `"I"`—only use `"I"` as first word if no other capitalized word exists or grammar requires it).
-   - Last word ends with `.`, `?`, or `!`.
-
-5. **Categorize Columns (`categorize_columns`):**
-   - Always include `wait 450` between `drag item-X slot-Y` actions because Efekta's UI takes ~400ms to accept a card into a category column.
-
-6. **Speaking / AI Video Avatar (`speaking_avatar`):**
-   - Run `efekta wait video-end` to wait for the avatar to finish speaking.
-   - Run `efekta solve speak --json`. It burns 3 attempts using speech-modulated WebRTC audio so speech recognition fails 3 times and unlocks manual multiple-choice options (`opt-1`, `opt-2`...).
-   - Click the correct option and advance!
+### Case 7: `speaking_avatar` (Microphone / AI Video Human)
+- **Non-final stage (`skip-1` is present):**
+  ```bash
+  efekta batch "click skip-1; next" --json -c
+  ```
+- **Final stage (Mandatory AI Avatar Dialogue, no `skip-1`):**
+  1. Unlock manual choices via 3-attempt synthetic audio bypass:
+     ```bash
+     efekta batch "wait video-end; solve speak" --json -c
+     ```
+  2. Pick the right manual choice + advance:
+     ```bash
+     efekta batch "pick opt-1; next" --json -c
+     ```

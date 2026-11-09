@@ -37,3 +37,27 @@ func TestParseBatchString(t *testing.T) {
 		t.Errorf("unexpected cmd[7]: %+v", cmds[7])
 	}
 }
+
+func TestParseTurboBatchCommands(t *testing.T) {
+	input := `pick opt-1,opt-3; pair slot-1:item-3, slot-2:item-1; sort slot-1:item-1,item-2; gaps wait, better, time; next`
+	cmds := ParseBatchString(input)
+
+	if len(cmds) != 5 {
+		t.Fatalf("expected 5 turbo batch commands, got %d: %+v", len(cmds), cmds)
+	}
+	if cmds[0].Action != "pick" || cmds[0].Target != "opt-1,opt-3" {
+		t.Errorf("unexpected pick cmd: %+v", cmds[0])
+	}
+	if cmds[1].Action != "pair" || cmds[1].Target != "slot-1:item-3, slot-2:item-1" {
+		t.Errorf("unexpected pair cmd: %+v", cmds[1])
+	}
+	if cmds[2].Action != "sort" || cmds[2].Target != "slot-1:item-1,item-2" {
+		t.Errorf("unexpected sort cmd: %+v", cmds[2])
+	}
+	if cmds[3].Action != "gaps" || cmds[3].Target != "wait, better, time" {
+		t.Errorf("unexpected gaps cmd: %+v", cmds[3])
+	}
+	if cmds[4].Action != "next" || cmds[4].Amount != 7 {
+		t.Errorf("unexpected next cmd: %+v", cmds[4])
+	}
+}

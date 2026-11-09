@@ -1,61 +1,46 @@
 ---
 name: efekta-automation
-description: Automate English lessons and exercises on learn.better.efekta.com using the high-speed efekta CLI and MCP server. Use when the user asks to complete, solve, or automate Efekta lessons, units, or stages.
+description: Ultra-fast 1-command-per-screen automation for learn.better.efekta.com using the efekta v2.2 Turbo CLI and MCP server.
 ---
 
-# Efekta Lesson Automation Skill
+# Efekta Automation Skill (Turbo Engine v2.2)
 
-Use the `efekta` CLI (or `efekta mcp` tools) to inspect and complete interactive English exercises on `learn.better.efekta.com`.
+Use this skill whenever the user asks you to complete lessons, units, or levels on `learn.better.efekta.com`.
 
-## 1. Core Loop
+## 4 Golden Rules for Maximum Speed
+1. **Never call `status` or `wait` manually after an action:** Every `batch` and `next` call automatically waits for UI locks and returns the new `PageState` (with `agentHint`).
+2. **Always end every exercise `batch` with `; next`:** Automatically clicks Next and fast-forwards through all reading cards, `"Correct answers"` review screens, `"Step passed!"` celebrations, and Lesson Overviews until the next interactive exercise.
+3. **Always pass `--json -c`:** Compact mode removes the verbose `elements` coordinate list (saving 80% tokens) while preserving `agentHint` (`exerciseType`, `actionTemplate`, `slots`, `items`, `options`, `inputs`) and `contextText`.
+4. **Never record audio in Stages 1–5:** If `skip-1` is present, run `efekta batch "click skip-1; next" --json -c`.
 
-1. Inspect the active Efekta tab:
-   ```bash
-   efekta status --json
-   ```
-2. Read `exerciseType`, `prompt`, `contextText` (with inline `[input-1]` or `[slot-1]` markers), `feedback`, `canProceed`, and `elements`.
-3. Execute the optimal strategy for the detected `exerciseType`:
+## Instant Decision Matrix (`agentHint.exerciseType` -> 1 Command)
 
-### Multiple Choice (`multiple_choice`)
-- Brute-force all options automatically:
+- **`passive_screen` / `lesson_overview`**:
   ```bash
-  efekta solve choice --json
+  efekta next --json -c
   ```
-- Or click the semantically correct `opt-N` and then `efekta click next-1`.
-
-### Fill in the Blanks (`fill_in_the_blanks`)
-- Read `contextText` to see where `[input-1]`, `[input-2]` sit in the sentence.
-- **Always wait 350ms between typing each word** so Efekta's UI does not reset:
+- **`matching_pairs`**:
   ```bash
-  efekta batch "type input-1 answer1; wait 350; type input-2 answer2; wait 350; click next-1" --json
+  efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
   ```
-
-### Sentence Ordering (`order_sentence`)
-- Run heuristic analysis:
+- **`categorize_columns`**:
   ```bash
-  efekta solve sentence --json
+  efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c
   ```
-- **Heuristics:**
-  - The first word always starts with a capital letter (note: `"I"` is always capitalized in English, so check if another capitalized word exists first).
-  - The last word always ends with punctuation (`.`, `?`, `!`).
-- Drag or click words in sequence (`efekta drag item-X slot-Y` or `efekta click item-X`).
-
-### Column Categorization (`categorize_columns`)
-- Drag items (`item-1`, `item-2`...) into category columns (`slot-1`, `slot-2`...).
-- **Always wait 450ms between drags** because Efekta's UI accepts cards slowly:
+- **`selection_gaps` / `fill_in_the_blanks`**:
   ```bash
-  efekta batch "drag item-1 slot-1; wait 450; drag item-2 slot-2; wait 450" --json
+  efekta batch "gaps word1, word2, word3, word4; next" --json -c
   ```
-
-### Speaking / Video Avatar (`speaking_avatar`)
-- **First 3 stages rule:** Inside a lesson, the first 3 stages can be passed without voice—click the end/stage nav (`stage-N`) to check minimum pass requirements and only complete non-voice tasks.
-- **When voice dialog is mandatory:**
-  1. Wait for the AI video avatar to finish talking:
-     ```bash
-     efekta wait video-end --json
-     ```
-  2. Trigger the 3-attempt synthetic speech bypass to unlock manual text answers:
-     ```bash
-     efekta solve speak --json
-     ```
-  3. Select the unlocked manual choice (`opt-1`, `opt-2`...).
+- **`multiple_choice`**:
+  ```bash
+  efekta batch "pick opt-1,opt-3; next" --json -c
+  ```
+- **`order_sentence`**:
+  ```bash
+  efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c
+  ```
+- **`speaking_avatar` (mandatory final stage)**:
+  ```bash
+  efekta batch "wait video-end; solve speak" --json -c
+  efekta batch "pick opt-1; next" --json -c
+  ```

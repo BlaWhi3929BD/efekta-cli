@@ -258,13 +258,13 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_batch",
-			"description": "Execute a semicolon-separated sequence of commands in one roundtrip (e.g. 'type input-1 goes; wait 350; type input-2 work; wait 350; click next-1'). Supports click, drag, type, press, scroll, wait, solve.",
+			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"commands": map[string]interface{}{
 						"type":        "string",
-						"description": "Semicolon-separated command chain",
+						"description": "Semicolon-separated command chain (always end with '; next' to auto-advance!)",
 					},
 				},
 				"required": []string{"commands"},

@@ -22,9 +22,12 @@ const (
 	HealthURL = "http://127.0.0.1:8765/api/health"
 )
 
+var localHTTPClient = &http.Client{
+	Transport: &http.Transport{},
+}
+
 func isDaemonRunning() bool {
-	client := http.Client{Timeout: 400 * time.Millisecond}
-	resp, err := client.Get(HealthURL)
+	resp, err := localHTTPClient.Get(HealthURL)
 	if err != nil {
 		return false
 	}
@@ -67,11 +70,6 @@ func execCommand(cmd protocol.Command) (*protocol.Response, error) {
 		return nil, err
 	}
 
-	timeout := 20 * time.Second
-	if cmd.Action == "skip_speaking" || cmd.Action == "solve_choice" || cmd.Action == "wait" || cmd.Action == "batch" {
-		timeout = 40 * time.Second
-	}
-
 	req, err := http.NewRequest(http.MethodPost, ApiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
@@ -79,8 +77,7 @@ func execCommand(cmd protocol.Command) (*protocol.Response, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set(daemon.ClientHeader, daemon.ClientValue)
 
-	client := http.Client{Timeout: timeout}
-	httpResp, err := client.Do(req)
+	httpResp, err := localHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query daemon: %w", err)
 	}
@@ -100,85 +97,90 @@ func ParseBatchString(batchStr string) []protocol.BatchSubCommand {
 }
 
 func printHelp() {
-	fmt.Println(`efekta v2.0 - Ultra-fast CLI & MCP Server for learn.better.efekta.com (AI Agent Ready)
+	fmt.Println(`efekta v2.2 (Turbo Engine) - Ultra-fast CLI & MCP Server for learn.better.efekta.com
 
 USAGE:
   efekta <command> [arguments] [flags]
 
+TURBO MACRO COMMANDS (1-Command-Per-Screen):
+  next / ff                    Auto-advance & fast-forward through all passive/reading/summary screens
+  pick <id1,id2,...>           Click 1 or more options/tokens with auto-unlock wait (e.g. pick opt-1,opt-3)
+  pair "<slot:item, ...>"      Match all left:right pairs in 1 roundtrip (e.g. pair "slot-1:item-3, slot-2:item-1")
+  sort "<slot:item1,item2>"    Sort items into categories (immune to DOM removal)
+  gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order
+  batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
+
 CORE COMMANDS:
-  state / status               Inspect page: exerciseType, prompt, contextText, feedback & element IDs
-  click <target>              Click element by virtual ID (opt-1, next-1), CSS selector, text, or x,y
-  drag <source> <target>      Drag element (item-1) to target slot/column (slot-1)
-  type <target> "<text>"      Type text into input/blank (React & contenteditable compatible)
-  press <key>                 Press keyboard key (Enter, Backspace, Escape, Tab, Space)
-  scroll <up|down|pixels>     Scroll page smoothly
-  wait <ms|video-end|next>    Wait for milliseconds, avatar video end, or Next button unlock
-  eval "<css_selector>"       Inspect matching DOM elements by CSS selector
-  screen [-o file.png]        Capture lossless PNG screenshot of the Efekta tab
-  batch "<cmd1>; <cmd2>..."   Execute chained commands in one roundtrip (click, drag, type, wait, solve)
-  solve <strategy>            Run smart solver: choice | sentence | speak
+  state / status               Inspect page: exerciseType, agentHint, prompt, contextText & element IDs
+  click <target>               Click element by virtual ID (opt-1, next-1), comma list, CSS selector, or text
+  drag <source> <target>       Drag element (item-1) to target slot/column (slot-1)
+  type <target> "<text>"       Type text into input/blank
+  press <key>                  Press keyboard key (Enter, Backspace, Escape, Tab, Space)
+  scroll <up|down|pixels>      Scroll page smoothly
+  wait <ms|video-end|next>     Wait for milliseconds, avatar video end, or Next button unlock
+  eval "<css_selector>"        Inspect matching DOM elements by CSS selector
+  screen [-o file.png]         Capture lossless PNG screenshot of the Efekta tab
+  solve <strategy>             Run smart solver: choice | sentence | speak
 
 AI & SYSTEM COMMANDS:
-  guide                       Print the complete AI Agent Playbook & Efekta Domain Heuristics
-  mcp                         Start Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio
-  daemon [run|stop|status]    Manage background WebSocket daemon (auto-starts on any command)
+  guide                        Print the Genius 1-Look AI Agent Decision Matrix & Playbook
+  mcp                          Start Model Context Protocol (MCP) JSON-RPC 2.0 server over stdio
+  daemon [run|stop|status]     Manage background WebSocket daemon (auto-starts on any command)
 
 FLAGS:
-  --json                      Output machine-readable JSON (recommended for AI agents)
-  -o, --output <path>         File output path (for screen)
+  --json                       Output machine-readable JSON (recommended for AI agents)
+  -c, --compact                Strip raw elements list from JSON (keeps agentHint & context, saves 80% tokens)
+  -o, --output <path>          File output path (for screen)
 
-EXAMPLES:
-  efekta status --json
-  efekta solve choice --json
-  efekta drag item-1 slot-1
-  efekta batch "drag item-1 slot-1; wait 300; drag item-2 slot-1; wait 300; click next-1"
-  efekta wait video-end && efekta solve speak
-  efekta guide`)
+TURBO EXAMPLES:
+  efekta next --json -c
+  efekta batch "pick opt-1,opt-3; next" --json -c
+  efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
+  efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
+  efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c`)
 }
 
 func printAgentGuide() {
-	fmt.Println(`# EFEKTA AI AGENT PLAYBOOK (learn.better.efekta.com)
+	fmt.Println(`# EFEKTA TURBO AGENT GUIDE (1-COMMAND-PER-SCREEN PLAYBOOK)
 
-## 1. Course Hierarchy & Stage Skipping Rule
-- Hierarchy: Level -> Unit -> Lesson -> Stages (inside a lesson).
-- FIRST 3 STAGES NO-VOICE RULE: The first 3 stages inside a lesson can be completed without microphone speech. Click the end/stage navigation elements (stage-N) to see minimum completion requirements for advancing to the next stage, and complete only the non-voice activities required.
+## GOLDEN RULES (MEMORIZE THESE 4 LAWS)
+1. **NEVER call 'status' or 'wait' manually between actions:**
+   Every 'batch', 'next', 'pick', 'pair', 'sort', and 'gaps' command automatically waits for animations/locks AND returns the fresh page state (including 'agentHint.actionTemplate')!
+2. **ALWAYS end exercise batches with '; next':**
+   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" review screens, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
+3. **ALWAYS read 'agentHint' first (use '--json -c' for 80% smaller output):**
+   'agentHint' gives you 'exerciseType', 'slots', 'items', 'options', and a ready-to-fill 'actionTemplate'.
+4. **SKIP optional speaking in Stages 1-5:**
+   If 'skip-1' is present on a speaking task, run: 'efekta batch "click skip-1; next" --json -c'.
 
-## 2. Exercise Types & Optimal Agent Strategies
-1. MULTIPLE CHOICE (exerciseType: "multiple_choice"):
-   - Easiest task. Run: 'efekta solve choice --json'
-   - Or rapidly click options via batch: 'efekta batch "click opt-1; wait 90; click opt-2; wait 90; click opt-3"'
-   - Clicking the right option immediately unlocks 'next-1' (canProceed: true).
+---
 
-2. FILL IN THE BLANKS (exerciseType: "fill_in_the_blanks"):
-   - Read 'prompt' and 'contextText' from 'efekta status --json' (blanks appear inline as [input-1]).
-   - IMPORTANT TIMING: Always wait 300-400ms after filling or guessing each word before filling the next one:
-     'efekta batch "type input-1 word1; wait 350; type input-2 word2; wait 350; click next-1"'
-   - Doing it without delay may cause Efekta's UI state to reset the previous blank.
+## INSTANT DECISION MATRIX (SEE TYPE -> RUN 1 COMMAND)
 
-3. ORDER BLOCKS / SENTENCE REORDERING (exerciseType: "order_sentence"):
-   - Run 'efekta solve sentence --json' to get heuristic analysis:
-     * First word ALWAYS starts with an uppercase letter (Note: pronoun "I" is always capitalized in English, so check if another capitalized word exists first!).
-     * Last word ALWAYS has ending punctuation ('.', '?', '!').
-   - Move blocks using 'efekta drag item-X slot-Y' or 'efekta click item-X', then check state.
+| 'exerciseType' in State | Instant 1-Roundtrip Command |
+| :--- | :--- |
+| 'passive_screen' / 'lesson_overview' | 'efekta next --json -c' |
+| 'multiple_choice' (1 answer) | 'efekta batch "pick opt-2; next" --json -c' (or 'efekta batch "solve choice; next" --json -c') |
+| 'multiple_choice' (multi-select) | 'efekta batch "pick opt-1,opt-3,opt-5; next" --json -c' |
+| 'matching_pairs' | 'efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c' |
+| 'categorize_columns' (sorting) | 'efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c' |
+| 'selection_gaps' / 'fill_in_the_blanks' | 'efekta batch "gaps word1, word2, word3, word4; next" --json -c' |
+| 'order_sentence' | 'efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c' |
+| 'speaking_avatar' (with 'skip-1') | 'efekta batch "click skip-1; next" --json -c' |
+| 'speaking_avatar' (final stage) | 'efekta batch "wait video-end; solve speak" --json -c' -> then 'efekta batch "pick opt-1; next" --json -c' |
 
-4. CATEGORIZE COLUMNS (exerciseType: "categorize_columns"):
-   - Words/phrases ('item-1', 'item-2'...) must be placed into category columns ('slot-1', 'slot-2'...).
-   - IMPORTANT TIMING: Efekta takes ~300-500ms to animate and accept a card into a column. Always wait between drags:
-     'efekta batch "drag item-1 slot-1; wait 450; drag item-2 slot-2; wait 450"'
+---
 
-5. SPEAKING / AI VIDEO AVATAR DIALOGUE (exerciseType: "speaking_avatar"):
-   - Inevitable voice stage with AI video human.
-   - 3-ATTEMPT BYPASS HACK:
-     Step 1: Wait for the AI video avatar to finish speaking: 'efekta wait video-end'
-     Step 2: Run 'efekta solve speak --json'
-     How it works: The extension injects speech-modulated synthetic audio into WebRTC and triggers recording 3 times. Speech recognition fails 3 times and Efekta automatically unlocks manual multiple-choice buttons ('opt-1', 'opt-2'...)!
-     Step 3: Select the correct option using 'efekta click opt-X' or 'efekta solve choice'.`)
+## WHY THIS IS 10x FASTER FOR AI AGENTS
+- **Snapshot Immunity:** 'pair', 'sort', and 'pick' snapshot element texts BEFORE clicking, so DOM removal or re-ordering mid-batch never shifts IDs!
+- **Auto-Lock Sync:** 'content.js' automatically polls until '.locked' and '.item-disabled' clear—no manual 'wait 300' or 'wait 500' needed.
+- **Auto-Drawer Handling:** 'gaps word1, word2' automatically opens each 'selection-gap-button', waits for '.drawer-option', clicks the matching word, and moves to the next gap.`)
 }
 
 func stripFlags(args []string) []string {
 	var clean []string
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--json" {
+		if args[i] == "--json" || args[i] == "--compact" || args[i] == "-c" {
 			continue
 		}
 		if (args[i] == "-o" || args[i] == "--output") && i+1 < len(args) {
@@ -190,6 +192,15 @@ func stripFlags(args []string) []string {
 	return clean
 }
 
+func applyCompactFilter(resp *protocol.Response, compact bool) {
+	if !compact || resp == nil || resp.Data == nil {
+		return
+	}
+	if dataMap, ok := resp.Data.(map[string]interface{}); ok {
+		delete(dataMap, "elements")
+	}
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		printHelp()
@@ -197,10 +208,13 @@ func main() {
 	}
 
 	jsonOutput := false
+	compactOutput := false
 	for _, arg := range os.Args[1:] {
 		if arg == "--json" {
 			jsonOutput = true
-			break
+		}
+		if arg == "--compact" || arg == "-c" {
+			compactOutput = true
 		}
 	}
 
@@ -242,18 +256,72 @@ func main() {
 			outputError(err, jsonOutput)
 			os.Exit(1)
 		}
+		applyCompactFilter(resp, compactOutput)
 		if jsonOutput {
 			printJSON(resp)
 			return
 		}
 		printStateHuman(resp)
 
-	case "click":
+	case "next", "ff":
+		hops := 7
+		if len(posArgs) >= 2 {
+			if n, err := strconv.Atoi(posArgs[1]); err == nil && n > 0 {
+				hops = n
+			}
+		}
+		resp, err := execCommand(protocol.Command{Action: "next", Amount: hops})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "pick":
 		if len(posArgs) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: efekta click <id|selector|x,y>")
+			fmt.Fprintln(os.Stderr, "Usage: efekta pick <opt-1,opt-2,...>")
 			os.Exit(1)
 		}
-		resp, err := execCommand(protocol.Command{Action: "click", Target: posArgs[1]})
+		target := strings.Join(posArgs[1:], " ")
+		resp, err := execCommand(protocol.Command{Action: "pick", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "pair", "match":
+		if len(posArgs) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: efekta pair \"slot-1:item-3, slot-2:item-1\"")
+			os.Exit(1)
+		}
+		target := strings.Join(posArgs[1:], " ")
+		resp, err := execCommand(protocol.Command{Action: "pair", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "sort":
+		if len(posArgs) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: efekta sort \"slot-1:item-1,item-2 | slot-2:item-3,item-4\"")
+			os.Exit(1)
+		}
+		target := strings.Join(posArgs[1:], " ")
+		resp, err := execCommand(protocol.Command{Action: "sort", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "gaps", "fill":
+		if len(posArgs) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: efekta gaps \"word1, word2, word3\"")
+			os.Exit(1)
+		}
+		target := strings.Join(posArgs[1:], " ")
+		resp, err := execCommand(protocol.Command{Action: "gaps", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "click":
+		if len(posArgs) < 2 {
+			fmt.Fprintln(os.Stderr, "Usage: efekta click <id|id1,id2|selector|x,y>")
+			os.Exit(1)
+		}
+		target := strings.Join(posArgs[1:], " ")
+		resp, err := execCommand(protocol.Command{Action: "click", Target: target})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "drag":
@@ -262,6 +330,7 @@ func main() {
 			os.Exit(1)
 		}
 		resp, err := execCommand(protocol.Command{Action: "drag", Source: posArgs[1], Target: posArgs[2]})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "type":
@@ -271,6 +340,7 @@ func main() {
 		}
 		text := strings.Join(posArgs[2:], " ")
 		resp, err := execCommand(protocol.Command{Action: "type", Target: posArgs[1], Text: text})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "press", "key":
@@ -279,6 +349,7 @@ func main() {
 			os.Exit(1)
 		}
 		resp, err := execCommand(protocol.Command{Action: "press", Target: posArgs[1]})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "scroll":
@@ -293,6 +364,7 @@ func main() {
 			}
 		}
 		resp, err := execCommand(protocol.Command{Action: "scroll", Direction: direction, Amount: amount})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "wait", "sleep":
@@ -301,6 +373,7 @@ func main() {
 			cond = posArgs[1]
 		}
 		resp, err := execCommand(protocol.Command{Action: "wait", Target: cond})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "eval", "query":
@@ -355,11 +428,12 @@ func main() {
 
 	case "batch":
 		if len(posArgs) < 2 {
-			fmt.Fprintln(os.Stderr, "Usage: efekta batch \"click opt-1; wait 80; click next-1\"")
+			fmt.Fprintln(os.Stderr, "Usage: efekta batch \"pair slot-1:item-2, slot-2:item-1; next\"")
 			os.Exit(1)
 		}
 		subCmds := ParseBatchString(posArgs[1])
 		resp, err := execCommand(protocol.Command{Action: "batch", Commands: subCmds})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "solve":
@@ -382,6 +456,7 @@ func main() {
 		}
 
 		resp, err := execCommand(protocol.Command{Action: action})
+		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	default:
@@ -400,8 +475,7 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 		}
 
 	case "status":
-		client := http.Client{Timeout: 1 * time.Second}
-		resp, err := client.Get(HealthURL)
+		resp, err := localHTTPClient.Get(HealthURL)
 		if err != nil {
 			if jsonOut {
 				printJSON(map[string]interface{}{"status": "stopped", "browserConnected": false})
@@ -488,6 +562,9 @@ func printStateHuman(resp *protocol.Response) {
 
 	fmt.Println("==================================================")
 	fmt.Printf("Exercise Type : %s\n", strings.ToUpper(state.ExerciseType))
+	if state.AgentHint != nil && state.AgentHint.ActionTemplate != "" {
+		fmt.Printf("Turbo Command : %s\n", state.AgentHint.ActionTemplate)
+	}
 	if state.Prompt != "" {
 		fmt.Printf("Prompt        : %s\n", state.Prompt)
 	}
@@ -512,7 +589,7 @@ func printStateHuman(resp *protocol.Response) {
 		if el.Disabled {
 			flags += " [DISABLED]"
 		}
-		fmt.Printf(" • %-10s [%-11s] (%4d,%4d) \"%s\"%s\n", el.ID, el.Type, el.X, el.Y, el.Text, flags)
+		fmt.Printf(" • %-10s [%-12s] (%4d,%4d) \"%s\"%s\n", el.ID, el.Type, el.X, el.Y, el.Text, flags)
 	}
 	fmt.Println("==================================================")
 }

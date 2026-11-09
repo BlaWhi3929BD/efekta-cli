@@ -65,7 +65,7 @@ type ClientSession struct {
 func (c *ClientSession) WriteJSONBytes(payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	_ = c.conn.SetWriteDeadline(time.Time{})
 	return c.conn.WriteMessage(websocket.TextMessage, payload)
 }
 
@@ -234,9 +234,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	timeout := 15 * time.Second
-	if cmd.Action == "skip_speaking" || cmd.Action == "solve_choice" || cmd.Action == "wait" || cmd.Action == "batch" {
-		timeout = 35 * time.Second
+	timeout := 20 * time.Second
+	switch cmd.Action {
+	case "skip_speaking", "solve_choice", "wait", "batch", "next", "sort", "pair", "gaps":
+		timeout = 45 * time.Second
 	}
 
 	resp, err := s.SendCommand(cmd, timeout)
@@ -306,9 +307,8 @@ func (s *Server) Run() error {
 	defer RemovePID()
 
 	server := &http.Server{
-		Addr:              "127.0.0.1:" + WsPort,
-		Handler:           s.NewMux(),
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    "127.0.0.1:" + WsPort,
+		Handler: s.NewMux(),
 	}
 
 	log.Printf("[daemon] Efekta Bridge Daemon v2.0 started on http://127.0.0.1:%s", WsPort)

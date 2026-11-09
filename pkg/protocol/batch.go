@@ -6,7 +6,7 @@ import (
 )
 
 // ParseBatchString parses a semicolon-separated chain of commands into BatchSubCommands.
-// Supports quoted multi-word targets for click, type, and eval.
+// Supports turbo macro actions: pick, pair/match, sort, gaps/fill, next/ff, plus click, drag, type, press, scroll, wait, solve.
 func ParseBatchString(batchStr string) []BatchSubCommand {
 	var subs []BatchSubCommand
 	parts := strings.Split(batchStr, ";")
@@ -20,12 +20,37 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 			continue
 		}
 		act := strings.ToLower(tokens[0])
+		rest := strings.Trim(strings.TrimSpace(item[len(tokens[0]):]), "\"'")
+
 		switch act {
 		case "click":
-			if len(tokens) >= 2 {
-				target := strings.Trim(strings.Join(tokens[1:], " "), "\"'")
-				subs = append(subs, BatchSubCommand{Action: "click", Target: target})
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "click", Target: rest})
 			}
+		case "pick":
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "pick", Target: rest})
+			}
+		case "pair", "match":
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "pair", Target: rest})
+			}
+		case "sort":
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "sort", Target: rest})
+			}
+		case "gaps", "fill":
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "gaps", Target: rest})
+			}
+		case "next", "ff":
+			hops := 7
+			if len(tokens) >= 2 {
+				if n, err := strconv.Atoi(tokens[1]); err == nil && n > 0 {
+					hops = n
+				}
+			}
+			subs = append(subs, BatchSubCommand{Action: "next", Amount: hops})
 		case "drag":
 			if len(tokens) >= 3 {
 				subs = append(subs, BatchSubCommand{Action: "drag", Source: tokens[1], Target: tokens[2]})
