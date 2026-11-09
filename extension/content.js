@@ -15,6 +15,16 @@
   }
   injectPageScriptFallback();
 
+  // Register frame with background service so commands can be routed directly to iframes
+  try {
+    chrome.runtime.sendMessage({
+      type: "FRAME_REGISTER",
+      url: window.location.href,
+      isTop: window === window.top,
+      isLessonPlayer: window.location.href.includes("lesson-player") || window.location.href.includes("gap")
+    });
+  } catch (_) {}
+
   let elementRegistry = new Map();
 
   function sleep(ms) {

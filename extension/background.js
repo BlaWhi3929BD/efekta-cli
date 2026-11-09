@@ -3,6 +3,7 @@ const DAEMON_WS_URL = "ws://127.0.0.1:8765/ws";
 let ws = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
+const tabFrames = new Map(); // tabId -> Map(frameId -> { url, isLessonPlayer })
 
 function log(...args) {
   console.log("[Efekta-Daemon-Bridge]", ...args);
@@ -58,32 +59,63 @@ async function ensureContentScriptInjected(tabId) {
   } catch (_) {}
 }
 
-// Send command to content script with automatic injection recovery if tab wasn't refreshed
-function sendMessageToTabWithRetry(tabId, req) {
+function sendMsg(tabId, req, options = {}) {
   return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, req, async (response) => {
+    chrome.tabs.sendMessage(tabId, req, options, (resp) => {
       if (chrome.runtime.lastError) {
-        // Content script not loaded in this tab yet -> inject dynamically and retry once!
-        await ensureContentScriptInjected(tabId);
-        setTimeout(() => {
-          chrome.tabs.sendMessage(tabId, req, (retryResp) => {
-            if (chrome.runtime.lastError) {
-              resolve({
-                success: false,
-                error:
-                  chrome.runtime.lastError.message +
-                  " (Please refresh the learn.better.efekta.com tab)"
-              });
-            } else {
-              resolve(retryResp || { success: false, error: "Empty response from content script" });
-            }
-          });
-        }, 120);
+        resolve({ success: false, error: chrome.runtime.lastError.message });
       } else {
-        resolve(response || { success: false, error: "Empty response from content script" });
+        resolve(resp || { success: false, error: "Empty response from content script" });
       }
     });
   });
+}
+
+// Send command to content script with automatic iframe and frame-routing support
+async function sendMessageToTabWithRetry(tabId, req) {
+  const framesMap = tabFrames.get(tabId);
+  let lessonFrameId = null;
+
+  if (framesMap) {
+    for (const [fId, info] of framesMap.entries()) {
+      if (info.isLessonPlayer || (info.url && (info.url.includes("lesson-player") || info.url.includes("gap")))) {
+        if (fId !== 0) {
+          lessonFrameId = fId;
+          break;
+        }
+      }
+    }
+  }
+
+  // If a child lesson-player iframe is registered, prioritize sending to it
+  if (lessonFrameId !== null) {
+    const res = await sendMsg(tabId, req, { frameId: lessonFrameId });
+    if (res && res.success) {
+      if (req.action !== "status" || (res.data && res.data.elementsCount > 0)) {
+        return res;
+      }
+    }
+  }
+
+  // Send to top-level frame (frameId: 0)
+  let res = await sendMsg(tabId, req, { frameId: 0 });
+  if (res && res.success && (req.action !== "status" || (res.data && res.data.elementsCount > 0))) {
+    return res;
+  }
+
+  // If status returned 0 elements, check any other registered child frames
+  if (framesMap && req.action === "status") {
+    for (const [fId] of framesMap.entries()) {
+      if (fId !== 0 && fId !== lessonFrameId) {
+        const childRes = await sendMsg(tabId, req, { frameId: fId });
+        if (childRes && childRes.success && childRes.data && childRes.data.elementsCount > 0) {
+          return childRes;
+        }
+      }
+    }
+  }
+
+  return res;
 }
 
 function connectDaemon() {
@@ -253,8 +285,24 @@ if (chrome.tabs && chrome.tabs.onUpdated) {
   });
 }
 
-// Handle messages from extension popup
+// Handle messages from content scripts and popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg && msg.type === "FRAME_REGISTER" && sender && sender.tab) {
+    let map = tabFrames.get(sender.tab.id);
+    if (!map) {
+      map = new Map();
+      tabFrames.set(sender.tab.id, map);
+    }
+    const frameId = typeof sender.frameId === "number" ? sender.frameId : 0;
+    map.set(frameId, {
+      url: msg.url,
+      isLessonPlayer: !!msg.isLessonPlayer,
+      isTop: !!msg.isTop
+    });
+    log(`Registered frame (tab ${sender.tab.id}, frame ${frameId}): ${msg.url} (lesson=${msg.isLessonPlayer})`);
+    return;
+  }
+
   if (msg && msg.type === "POPUP_GET_STATUS") {
     findEfektaTab().then((tab) => {
       sendResponse({

@@ -11,8 +11,8 @@
     "alarms"
   ],
   "host_permissions": [
-    "*://learn.better.efekta.com/*",
     "*://*.efekta.com/*",
+    "*://*.better.efekta.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
@@ -25,7 +25,10 @@
   },
   "content_scripts": [
     {
-      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
+      "matches": [
+        "*://*.efekta.com/*",
+        "*://*.better.efekta.com/*"
+      ],
       "js": ["content.js"],
       "run_at": "document_start",
       "all_frames": true
@@ -34,7 +37,10 @@
   "web_accessible_resources": [
     {
       "resources": ["injected.js"],
-      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"]
+      "matches": [
+        "*://*.efekta.com/*",
+        "*://*.better.efekta.com/*"
+      ]
     }
   ],
   "action": {
