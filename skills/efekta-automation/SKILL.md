@@ -39,8 +39,19 @@ Use this skill whenever the user asks you to complete lessons, units, or levels 
   ```bash
   efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c
   ```
-- **`speaking_avatar` (mandatory final stage)**:
+- **`speaking_practice`**:
   ```bash
-  efekta batch "wait video-end; solve speak" --json -c
-  efekta batch "pick opt-1; next" --json -c
+  efekta batch "speak all; next" --json -c
   ```
+- **`speaking_avatar` (mandatory final stage)**:
+  - If tap options are visible:
+    ```bash
+    efekta batch "pick opt-2; next" --json -c
+    ```
+  - If speech mode:
+    ```bash
+    efekta batch "speak opt-2; next" --json -c
+    # or by letter:
+    efekta batch "speak B; next" --json -c
+    ```
+  *(Always choose from the options listed in `agentHint.options`).*

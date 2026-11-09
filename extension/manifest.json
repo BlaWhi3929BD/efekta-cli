@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Efekta AI Bridge",
-  "version": "2.0.0",
-  "description": "High-speed cross-browser automation bridge connecting learn.better.efekta.com to efekta-cli & MCP for AI agents.",
+  "version": "3.0.0",
+  "description": "High-speed cross-browser automation bridge & Voice Engine connecting learn.better.efekta.com to efekta-cli & MCP for AI agents.",
   "permissions": [
     "tabs",
     "activeTab",
@@ -12,19 +12,30 @@
     "webNavigation"
   ],
   "host_permissions": [
+    "<all_urls>",
     "*://*.efekta.com/*",
     "*://*.better.efekta.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:* https://*"
   },
   "background": {
     "scripts": ["background.js"],
     "service_worker": "background.js"
   },
   "content_scripts": [
+    {
+      "matches": [
+        "*://*.efekta.com/*",
+        "*://*.better.efekta.com/*"
+      ],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
     {
       "matches": [
         "*://*.efekta.com/*",

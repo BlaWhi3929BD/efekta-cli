@@ -97,30 +97,33 @@ func ParseBatchString(batchStr string) []protocol.BatchSubCommand {
 }
 
 func printHelp() {
-	fmt.Println(`efekta v2.2 (Turbo Engine) - Ultra-fast CLI & MCP Server for learn.better.efekta.com
+	fmt.Println(`efekta v3.0 (Turbo + Voice Engine) - Ultra-fast CLI & MCP Server for learn.better.efekta.com
 
 USAGE:
   efekta <command> [arguments] [flags]
 
 TURBO MACRO COMMANDS (1-Command-Per-Screen):
-  next / ff                    Auto-advance & fast-forward through all passive/reading/summary screens
+  next / ff                    Auto-advance & fast-forward through all passive/reading/summary/eval screens
   pick <id1,id2,...>           Click 1 or more options/tokens with auto-unlock wait (e.g. pick opt-1,opt-3)
   pair "<slot:item, ...>"      Match all left:right pairs in 1 roundtrip (e.g. pair "slot-1:item-3, slot-2:item-1")
-  sort "<slot:item1,item2>"    Sort items into categories (immune to DOM removal)
-  gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order
+  sort "<slot:item1,item2>"    Sort items into categories (immune to DOM removal across batch steps)
+  gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order (auto-opens drawers)
+  speak [all|"<phrase>"]       Speak target English phrase(s) via native reference audio loopback or TTS!
   batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
 
 CORE COMMANDS:
   state / status               Inspect page: exerciseType, agentHint, prompt, contextText & element IDs
   click <target>               Click element by virtual ID (opt-1, next-1), comma list, CSS selector, or text
   drag <source> <target>       Drag element (item-1) to target slot/column (slot-1)
-  type <target> "<text>"       Type text into input/blank
+  type <target> "<text>"       Type text into input/blank (instant bulk-fill for long essays)
   press <key>                  Press keyboard key (Enter, Backspace, Escape, Tab, Space)
   scroll <up|down|pixels>      Scroll page smoothly
   wait <ms|video-end|next>     Wait for milliseconds, avatar video end, or Next button unlock
   eval "<css_selector>"        Inspect matching DOM elements by CSS selector
   screen [-o file.png]         Capture lossless PNG screenshot of the Efekta tab
   solve <strategy>             Run smart solver: choice | sentence | speak
+  voice [status|disarm|events] Inspect Voice Engine v3 status or disarm microphone override
+  reload [all|ext|tab]         Reload browser extension and/or Efekta tab
 
 AI & SYSTEM COMMANDS:
   guide                        Print the Genius 1-Look AI Agent Decision Matrix & Playbook
@@ -137,21 +140,22 @@ TURBO EXAMPLES:
   efekta batch "pick opt-1,opt-3; next" --json -c
   efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
   efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
-  efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c`)
+  efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
+  efekta batch "speak all; next" --json -c`)
 }
 
 func printAgentGuide() {
-	fmt.Println(`# EFEKTA TURBO AGENT GUIDE (1-COMMAND-PER-SCREEN PLAYBOOK)
+	fmt.Println(`# EFEKTA TURBO v3.0 AGENT GUIDE (1-COMMAND-PER-SCREEN PLAYBOOK)
 
 ## GOLDEN RULES (MEMORIZE THESE 4 LAWS)
 1. **NEVER call 'status' or 'wait' manually between actions:**
-   Every 'batch', 'next', 'pick', 'pair', 'sort', and 'gaps' command automatically waits for animations/locks AND returns the fresh page state (including 'agentHint.actionTemplate')!
+   Every 'batch', 'next', 'pick', 'pair', 'sort', 'gaps', and 'speak' command automatically waits for animations/locks, auto-opens selection-gap drawers so options are visible immediately, AND returns the fresh page state!
 2. **ALWAYS end exercise batches with '; next':**
-   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" review screens, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
+   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" review screens, "How did you find the task?" self-evaluations, AI feedback screens, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
 3. **ALWAYS read 'agentHint' first (use '--json -c' for 80% smaller output):**
-   'agentHint' gives you 'exerciseType', 'slots', 'items', 'options', and a ready-to-fill 'actionTemplate'.
-4. **SKIP optional speaking in Stages 1-5:**
-   If 'skip-1' is present on a speaking task, run: 'efekta batch "click skip-1; next" --json -c'.
+   'agentHint' gives you 'exerciseType', 'slots', 'items', 'options' (pre-populated even on selection_gaps!), and a ready-to-fill 'actionTemplate'.
+4. **REAL ENGLISH SPEECH ('speak all; next'):**
+   Voice Engine v3 keeps the user's real microphone 100% untouched by default, and when 'speak' is invoked, uses one-shot armed injection with either the page's native reference audio ("Play audio") or English TTS synthesis!
 
 ---
 
@@ -166,15 +170,8 @@ func printAgentGuide() {
 | 'categorize_columns' (sorting) | 'efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c' |
 | 'selection_gaps' / 'fill_in_the_blanks' | 'efekta batch "gaps word1, word2, word3, word4; next" --json -c' |
 | 'order_sentence' | 'efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c' |
-| 'speaking_avatar' (with 'skip-1') | 'efekta batch "click skip-1; next" --json -c' |
-| 'speaking_avatar' (final stage) | 'efekta batch "wait video-end; solve speak" --json -c' -> then 'efekta batch "pick opt-1; next" --json -c' |
-
----
-
-## WHY THIS IS 10x FASTER FOR AI AGENTS
-- **Snapshot Immunity:** 'pair', 'sort', and 'pick' snapshot element texts BEFORE clicking, so DOM removal or re-ordering mid-batch never shifts IDs!
-- **Auto-Lock Sync:** 'content.js' automatically polls until '.locked' and '.item-disabled' clear—no manual 'wait 300' or 'wait 500' needed.
-- **Auto-Drawer Handling:** 'gaps word1, word2' automatically opens each 'selection-gap-button', waits for '.drawer-option', clicks the matching word, and moves to the next gap.`)
+| 'speaking_practice' (pronunciation drill) | 'efekta batch "speak all; next" --json -c' (or 'efekta batch "click skip-1; next" --json -c') |
+| 'speaking_avatar' (AI video roleplay) | 'efekta batch "wait video-end; solve speak; next" --json -c' |`)
 }
 
 func stripFlags(args []string) []string {
@@ -264,7 +261,7 @@ func main() {
 		printStateHuman(resp)
 
 	case "next", "ff":
-		hops := 7
+		hops := 9
 		if len(posArgs) >= 2 {
 			if n, err := strconv.Atoi(posArgs[1]); err == nil && n > 0 {
 				hops = n
@@ -313,6 +310,42 @@ func main() {
 		resp, err := execCommand(protocol.Command{Action: "gaps", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "speak", "say":
+		target := "all"
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "speak", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "voice":
+		target := "status"
+		if len(posArgs) >= 2 {
+			target = posArgs[1]
+		}
+		resp, err := execCommand(protocol.Command{Action: "voice", Target: target})
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "reload":
+		mode := "all"
+		if len(posArgs) >= 2 {
+			mode = strings.ToLower(posArgs[1])
+		}
+		switch mode {
+		case "tab":
+			resp, err := execCommand(protocol.Command{Action: "reload_tab"})
+			handleSimpleResponse(resp, err, jsonOutput)
+		case "ext", "extension":
+			resp, err := execCommand(protocol.Command{Action: "reload_extension"})
+			handleSimpleResponse(resp, err, jsonOutput)
+		default:
+			_, _ = execCommand(protocol.Command{Action: "reload_extension"})
+			time.Sleep(700 * time.Millisecond)
+			resp, err := execCommand(protocol.Command{Action: "reload_tab"})
+			handleSimpleResponse(resp, err, jsonOutput)
+		}
 
 	case "click":
 		if len(posArgs) < 2 {

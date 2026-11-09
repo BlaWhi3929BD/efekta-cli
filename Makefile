@@ -11,6 +11,7 @@ build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/efekta
 
 test:
+	node -c extension/*.js
 	go test -race -v ./...
 
 install: build

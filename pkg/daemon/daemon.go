@@ -234,10 +234,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	timeout := 20 * time.Second
+	timeout := 25 * time.Second
 	switch cmd.Action {
-	case "skip_speaking", "solve_choice", "wait", "batch", "next", "sort", "pair", "gaps":
-		timeout = 45 * time.Second
+	case "speak", "skip_speaking", "solve_choice", "wait", "batch", "next", "sort", "pair", "gaps":
+		timeout = 60 * time.Second
 	}
 
 	resp, err := s.SendCommand(cmd, timeout)
@@ -297,6 +297,7 @@ func (s *Server) NewMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.HandleFunc("/api/exec", s.handleAPI)
+	mux.HandleFunc("/api/tts", s.handleTTS)
 	mux.HandleFunc("/api/health", s.handleHealth)
 	return mux
 }

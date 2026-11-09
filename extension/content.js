@@ -1,12 +1,14 @@
-// Efekta Bridge - Content Script (Turbo Engine v2.2)
+// Efekta Bridge - Content Script (Turbo Engine v3.0 + Voice Engine v3.0)
 (function () {
-  if (window.__efekta_content_loaded) return;
-  window.__efekta_content_loaded = true;
+  if (window.__efekta_content_active_instance) return;
+  window.__efekta_content_active_instance = true;
+
+  const EVT_IN = "efekta:in";
+  const EVT_OUT = "efekta:out";
 
   // Fallback injection in case browser didn't support world: "MAIN" in manifest
   function injectPageScriptFallback() {
     try {
-      if (window.__efekta_injected_loaded) return;
       const script = document.createElement("script");
       script.src = chrome.runtime.getURL("injected.js");
       script.onload = () => script.remove();
@@ -17,54 +19,123 @@
 
   // Register frame with background service so commands can be routed directly to iframes
   try {
+    const isTop = window === window.top;
     chrome.runtime.sendMessage({
       type: "FRAME_REGISTER",
       url: window.location.href,
-      isTop: window === window.top,
+      isTop,
       isLessonPlayer:
-        window.location.href.includes("lesson-player") ||
-        window.location.href.includes("gap")
+        !isTop &&
+        (window.location.href.includes("lesson-player") ||
+          window.location.href.includes("study.better.efekta.com"))
     });
   } catch (_) {}
 
   const elementRegistry = new Map();
   const idToTextMap = new Map();
+  // Batch-level snapshot preserved across subcommands in a single batch call
+  const batchElementSnapshot = new Map();
+  const batchTextSnapshot = new Map();
+  let inBatchExecution = false;
 
   function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  function isVisible(el) {
-    if (!el || !el.getBoundingClientRect) return false;
-    const rect = el.getBoundingClientRect();
-    if (rect.width <= 1 || rect.height <= 1) return false;
-    const style = window.getComputedStyle(el);
-    if (
-      style.display === "none" ||
-      style.visibility === "hidden" ||
-      parseFloat(style.opacity) === 0
-    ) {
-      return false;
-    }
-    return true;
+  // Send a request to MAIN-world injected.js over CustomEvent JSON bridge
+  let voiceReqSeq = 0;
+  function callVoiceBridge(payload, timeoutMs = 4000) {
+    return new Promise((resolve) => {
+      const reqId = `vreq-${Date.now()}-${++voiceReqSeq}`;
+      let done = false;
+      const onOut = (ev) => {
+        if (done) return;
+        let data = null;
+        try {
+          data = JSON.parse(String(ev.detail || ""));
+        } catch (_) {
+          return;
+        }
+        if (!data || data.reqId !== reqId) return;
+        done = true;
+        document.removeEventListener(EVT_OUT, onOut);
+        clearTimeout(timer);
+        resolve(data);
+      };
+      const timer = setTimeout(() => {
+        if (done) return;
+        done = true;
+        document.removeEventListener(EVT_OUT, onOut);
+        resolve({ ok: false, error: "Voice bridge timeout" });
+      }, timeoutMs);
+
+      document.addEventListener(EVT_OUT, onOut);
+      try {
+        document.dispatchEvent(
+          new CustomEvent(EVT_IN, {
+            detail: JSON.stringify(Object.assign({}, payload, { reqId }))
+          })
+        );
+      } catch (e) {
+        done = true;
+        document.removeEventListener(EVT_OUT, onOut);
+        clearTimeout(timer);
+        resolve({ ok: false, error: (e && e.message) || String(e) });
+      }
+    });
   }
 
-  // Extract clean human-visible text without screen-reader duplicates (.cdk-visually-hidden) or icon ligatures
+  function isVisible(el) {
+    if (!el || !el.getBoundingClientRect) return false;
+    try {
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 1 || rect.height <= 1) return false;
+      const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+      const style = win.getComputedStyle(el);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        parseFloat(style.opacity) === 0
+      ) {
+        return false;
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Extract clean human-visible text without screen-reader duplicates (.cdk-visually-hidden),
+  // hidden gap sizing placeholders, or icon ligatures
   function cleanText(el) {
     if (!el) return "";
     const hiddenSelector =
-      ".cdk-visually-hidden, .sr-only, .visually-hidden, .screen-reader-overview, ef-icon, mat-icon, svg, script, style";
+      ".cdk-visually-hidden, .sr-only, .visually-hidden, .screen-reader-overview, [aria-hidden='true'], [hidden], .longest-option, ef-icon, mat-icon, svg, script, style";
     let raw = "";
     try {
-      const walker = document.createTreeWalker(
+      const doc = el.ownerDocument || document;
+      const win = doc.defaultView || window;
+      const walker = doc.createTreeWalker(
         el,
         NodeFilter.SHOW_TEXT,
         {
           acceptNode(node) {
             const p = node.parentElement;
-            if (p && p.closest && p.closest(hiddenSelector)) {
+            if (!p) return NodeFilter.FILTER_ACCEPT;
+            if (p.closest && p.closest(hiddenSelector)) {
               return NodeFilter.FILTER_REJECT;
             }
+            try {
+              const st = win.getComputedStyle(p);
+              if (
+                st &&
+                (st.display === "none" ||
+                  st.visibility === "hidden" ||
+                  parseFloat(st.opacity) === 0)
+              ) {
+                return NodeFilter.FILTER_REJECT;
+              }
+            } catch (_) {}
             return NodeFilter.FILTER_ACCEPT;
           }
         }
@@ -105,7 +176,7 @@
     return raw;
   }
 
-  // Wait automatically until Efekta's transient UI locks (.locked, .item-disabled, .item-selected) clear
+  // Wait automatically until Efekta's transient UI locks (.locked, .item-disabled) clear
   async function waitUntilUnlocked(maxWaitMs = 1600) {
     const start = Date.now();
     const docs = getAllDocs();
@@ -127,38 +198,70 @@
     return false;
   }
 
+  // Auto-dismiss transient "Okay, got it" activity instruction overlays
+  async function dismissOverlaysIfPresent() {
+    const docs = getAllDocs();
+    for (const doc of docs) {
+      const buttons = Array.from(doc.querySelectorAll("button")).filter(isVisible);
+      const gotIt = buttons.find((b) => /^(okay,\s*got it|got it|ok,\s*got it)$/i.test(cleanText(b)));
+      if (gotIt) {
+        await simulateClick(gotIt);
+        await sleep(120);
+        return true;
+      }
+    }
+    return false;
+  }
+
   // Dispatch realistic single click (pierces shadow DOM and ef-lesson-overview-step)
   async function simulateClick(rawEl) {
     if (!rawEl) return false;
     let el = rawEl;
-    const tag = (rawEl.tagName || "").toLowerCase();
-    if (tag === "ef-lesson-overview-step") {
-      const innerContent = rawEl.querySelector(".content, .step-content, button, div");
-      if (innerContent) el = innerContent;
-    } else if (rawEl.shadowRoot) {
+    if (rawEl.shadowRoot) {
       const shadowBtn = rawEl.shadowRoot.querySelector(
         'button, a, [role="button"], div, span'
       );
       if (shadowBtn) el = shadowBtn;
+    } else if (rawEl.tagName && /^(ef-|app-|ui-)/i.test(rawEl.tagName)) {
+      // For Angular custom elements without shadow DOM, target inner clickable element
+      const innerTarget = rawEl.querySelector(
+        '.content, .step, button, a, [role="button"], ef-lesson-overview-step-info'
+      );
+      if (innerTarget) el = innerTarget;
     }
 
     try {
       el.scrollIntoView({ behavior: "instant", block: "center", inline: "center" });
     } catch (_) {}
 
+    const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+    const PEvent = win.PointerEvent || PointerEvent;
+    const MEvent = win.MouseEvent || MouseEvent;
+
     const rect = el.getBoundingClientRect();
     const x = rect.left + rect.width / 2;
     const y = rect.top + rect.height / 2;
+
+    const doc = el.ownerDocument || document;
+    let hitEl = el;
+    try {
+      if (typeof doc.elementFromPoint === "function") {
+        const topEl = doc.elementFromPoint(x, y);
+        if (topEl && (topEl === el || el.contains(topEl) || topEl.contains(el))) {
+          hitEl = topEl;
+        }
+      }
+    } catch (_) {}
 
     const baseInit = {
       bubbles: true,
       cancelable: true,
       composed: true,
-      view: window,
+      view: win,
       clientX: x,
       clientY: y,
-      screenX: x + (window.screenX || 0),
-      screenY: y + (window.screenY || 0),
+      screenX: x + (win.screenX || 0),
+      screenY: y + (win.screenY || 0),
       button: 0,
       buttons: 1,
       isPrimary: true,
@@ -166,35 +269,29 @@
       pointerType: "mouse"
     };
 
-    el.dispatchEvent(new PointerEvent("pointerover", baseInit));
-    el.dispatchEvent(new PointerEvent("pointerenter", { ...baseInit, bubbles: false }));
-    el.dispatchEvent(new MouseEvent("mouseover", baseInit));
-    el.dispatchEvent(new MouseEvent("mouseenter", { ...baseInit, bubbles: false }));
-    el.dispatchEvent(new PointerEvent("pointerdown", baseInit));
-    el.dispatchEvent(new MouseEvent("mousedown", baseInit));
+    hitEl.dispatchEvent(new PEvent("pointerover", baseInit));
+    hitEl.dispatchEvent(new PEvent("pointerenter", { ...baseInit, bubbles: false }));
+    hitEl.dispatchEvent(new MEvent("mouseover", baseInit));
+    hitEl.dispatchEvent(new MEvent("mouseenter", { ...baseInit, bubbles: false }));
+    hitEl.dispatchEvent(new PEvent("pointerdown", baseInit));
+    hitEl.dispatchEvent(new MEvent("mousedown", baseInit));
 
-    if (typeof el.focus === "function") {
+    if (typeof hitEl.focus === "function") {
       try {
-        el.focus({ preventScroll: true });
+        hitEl.focus({ preventScroll: true });
       } catch (_) {}
     }
 
-    await sleep(12);
+    await sleep(20);
 
     const upInit = { ...baseInit, buttons: 0 };
-    el.dispatchEvent(new PointerEvent("pointerup", upInit));
-    el.dispatchEvent(new MouseEvent("mouseup", upInit));
+    hitEl.dispatchEvent(new PEvent("pointerup", upInit));
+    hitEl.dispatchEvent(new MEvent("mouseup", upInit));
 
-    if (typeof el.click === "function") {
-      el.click();
+    if (typeof hitEl.click === "function") {
+      hitEl.click();
     } else {
-      el.dispatchEvent(new MouseEvent("click", upInit));
-    }
-
-    if (rawEl !== el) {
-      try {
-        if (typeof rawEl.click === "function") rawEl.click();
-      } catch (_) {}
+      hitEl.dispatchEvent(new MEvent("click", upInit));
     }
 
     return true;
@@ -257,9 +354,9 @@
       );
     } catch (_) {}
 
-    await sleep(20);
+    await sleep(18);
 
-    const steps = 8;
+    const steps = 6;
     for (let i = 1; i <= steps; i++) {
       const curX = startX + ((endX - startX) * i) / steps;
       const curY = startY + ((endY - startY) * i) / steps;
@@ -309,7 +406,7 @@
           })
         );
       }
-      await sleep(12);
+      await sleep(10);
     }
 
     if (dataTransfer) {
@@ -344,7 +441,7 @@
     targetEl.dispatchEvent(new PointerEvent("pointerup", upInit));
     targetEl.dispatchEvent(new MouseEvent("mouseup", upInit));
     document.dispatchEvent(new PointerEvent("pointerup", upInit));
-    document.dispatchEvent(new MouseEvent("mouseup", upInit));
+    document.dispatchEvent(new MouseEvent("mousemove", upInit));
 
     if (dataTransfer) {
       sourceEl.dispatchEvent(
@@ -380,45 +477,117 @@
     el.value = value;
   }
 
-  // Simulate text typing compatible with React/Angular and contenteditable blanks
-  async function simulateType(el, text, delayMs = 12) {
+  // Simulate text typing compatible with React/Angular and contenteditable blanks.
+  // Fast-paths long essay inputs (>30 chars) in <50ms so 120-word writing tasks never time out!
+  async function simulateType(el, text, delayMs = 6) {
     if (!el) return false;
+    await dismissOverlaysIfPresent();
     await simulateClick(el);
     try {
       el.focus();
     } catch (_) {}
 
+    const str = String(text || "");
     const isContentEditable =
       el.isContentEditable || el.getAttribute("contenteditable") === "true";
 
     if (isContentEditable) {
       el.textContent = "";
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
-      for (const ch of text) {
-        el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
-        el.textContent += ch;
+      el.dispatchEvent(
+        new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" })
+      );
+      if (str.length > 35) {
+        el.textContent = str;
         el.dispatchEvent(
           new InputEvent("input", {
             bubbles: true,
             cancelable: false,
             inputType: "insertText",
-            data: ch
+            data: str
           })
         );
-        el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
-        if (delayMs > 0) await sleep(delayMs);
+      } else {
+        for (const ch of str) {
+          el.dispatchEvent(
+            new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true })
+          );
+          el.textContent += ch;
+          el.dispatchEvent(
+            new InputEvent("input", {
+              bubbles: true,
+              cancelable: false,
+              inputType: "insertText",
+              data: ch
+            })
+          );
+          el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
+          if (delayMs > 0) await sleep(delayMs);
+        }
       }
       el.dispatchEvent(new Event("change", { bubbles: true }));
       return true;
     }
 
     setNativeValue(el, "");
-    el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+    el.dispatchEvent(
+      new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" })
+    );
+
+    if (str.length > 35) {
+      // Instant bulk fill for long essays / sentences with realistic final keystroke events
+      const prefix = str.slice(0, -1);
+      const lastCh = str.slice(-1);
+      if (prefix) {
+        el.dispatchEvent(
+          new InputEvent("beforeinput", {
+            bubbles: true,
+            cancelable: true,
+            inputType: "insertText",
+            data: prefix
+          })
+        );
+        setNativeValue(el, prefix);
+        el.dispatchEvent(
+          new InputEvent("input", {
+            bubbles: true,
+            cancelable: false,
+            inputType: "insertText",
+            data: prefix
+          })
+        );
+      }
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: lastCh, bubbles: true, cancelable: true })
+      );
+      el.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: lastCh
+        })
+      );
+      setNativeValue(el, str);
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: false,
+          inputType: "insertText",
+          data: lastCh
+        })
+      );
+      el.dispatchEvent(new KeyboardEvent("keyup", { key: lastCh, bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(30);
+      return true;
+    }
 
     let current = "";
-    for (const ch of text) {
+    for (const ch of str) {
       current += ch;
-      el.dispatchEvent(new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true }));
+      el.dispatchEvent(
+        new KeyboardEvent("keydown", { key: ch, bubbles: true, cancelable: true })
+      );
       el.dispatchEvent(
         new InputEvent("beforeinput", {
           bubbles: true,
@@ -446,7 +615,10 @@
 
   // Simulate pressing a special key (Enter, Backspace, Escape, Tab, Space, Arrow*)
   async function simulateKeyPress(targetSpec, key) {
-    const el = (targetSpec ? resolveElement(targetSpec) : null) || document.activeElement || document.body;
+    const el =
+      (targetSpec ? resolveElement(targetSpec) : null) ||
+      document.activeElement ||
+      document.body;
     const keyMap = {
       Enter: { key: "Enter", code: "Enter", keyCode: 13 },
       Escape: { key: "Escape", code: "Escape", keyCode: 27 },
@@ -508,18 +680,30 @@
     return null;
   }
 
-  // Resolve element by virtual ID, saved ID text snapshot, data-efekta-id, coordinates "x,y", CSS selector, or text
+  // Resolve element by virtual ID, batch snapshot, saved ID text snapshot, data-efekta-id, coordinates "x,y", CSS selector, or text
   function resolveElement(target) {
     if (!target) return null;
 
+    function isConnectedNode(el) {
+      return (
+        el &&
+        (el.isConnected ||
+          (el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)))
+      );
+    }
+
     function findOnce(allowSavedTextFallback) {
+      // 1. If in batch execution, prefer the initial pre-batch DOM reference if still connected!
+      if (inBatchExecution && batchElementSnapshot.has(target)) {
+        const snapEl = batchElementSnapshot.get(target);
+        if (isConnectedNode(snapEl) && isVisible(snapEl)) {
+          return snapEl;
+        }
+      }
+
       if (elementRegistry.has(target)) {
         const el = elementRegistry.get(target);
-        if (
-          el &&
-          (el.isConnected ||
-            (el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)))
-        ) {
+        if (isConnectedNode(el)) {
           return el;
         }
       }
@@ -544,8 +728,9 @@
       }
 
       // If target was a virtual ID whose DOM element re-rendered mid-batch, match by its snapshotted clean text!
-      if (allowSavedTextFallback && idToTextMap.has(target)) {
-        const savedText = idToTextMap.get(target);
+      if (allowSavedTextFallback) {
+        const savedText =
+          (inBatchExecution && batchTextSnapshot.get(target)) || idToTextMap.get(target);
         if (savedText) {
           const bySaved = findInteractiveByText(savedText);
           if (bySaved) return bySaved;
@@ -587,7 +772,7 @@
 
     // Element not found - re-index DOM and retry
     inspectState();
-    return findOnce(false);
+    return findOnce(true);
   }
 
   // Extract visible media status (Video & Audio)
@@ -609,9 +794,16 @@
         duration: 0
       };
     }
-    const active = mediaList.find((m) => !m.paused && !m.ended) || mediaList[0];
-    const hasVideo = mediaList.some((m) => m.tagName.toLowerCase() === "video");
-    const hasAudio = mediaList.some((m) => m.tagName.toLowerCase() === "audio");
+    const visibleMedia = mediaList.filter((m) => {
+      const src = (m.currentSrc || m.src || "").toLowerCase();
+      if (src.includes("addi") || src.includes("rain.mp4")) return false;
+      if (!isVisible(m)) return false;
+      return true;
+    });
+    const candidates = visibleMedia.length ? visibleMedia : mediaList;
+    const active = candidates.find((m) => !m.paused && !m.ended) || candidates[0];
+    const hasVideo = candidates.some((m) => m.tagName.toLowerCase() === "video");
+    const hasAudio = candidates.some((m) => m.tagName.toLowerCase() === "audio");
     return {
       hasVideo,
       hasAudio,
@@ -620,6 +812,64 @@
       currentTime: Number((active.currentTime || 0).toFixed(2)),
       duration: Number((active.duration || 0).toFixed(2)) || 0,
       isPlaying: !active.paused && !active.ended && active.currentTime > 0
+    };
+  }
+
+  // Extract speaking task metadata (target phrase to pronounce, Play Audio button, progress counter)
+  function extractSpeakingInfo(docs) {
+    let targetPhrase = "";
+    let playAudioBtn = null;
+    let progressText = "";
+    let isSpeakingPractice = false;
+
+    for (const doc of docs) {
+      const practiceTask = doc.querySelector("ef-speaking-practice-task");
+      if (practiceTask && isVisible(practiceTask)) {
+        isSpeakingPractice = true;
+      }
+
+      const wordLabels = Array.from(
+        doc.querySelectorAll("ef-speaking-practice-task label.word, span.target ol li label, label.word")
+      ).filter(isVisible);
+      if (wordLabels.length > 0) {
+        const joined = wordLabels
+          .map((w) => cleanText(w))
+          .filter(Boolean)
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (joined) {
+          targetPhrase = joined;
+          isSpeakingPractice = true;
+        }
+      }
+
+      if (!targetPhrase) {
+        const targetOl = doc.querySelector("ef-speaking-practice-task span.target ol, span.target ol");
+        if (targetOl && isVisible(targetOl)) {
+          targetPhrase = cleanText(targetOl);
+          isSpeakingPractice = true;
+        }
+      }
+
+      const audioBtn = doc.querySelector(
+        "ef-speaking-practice-task button.audio-btn, ef-media-short-audio-player button, button.audio-btn.with-label, button.audio-btn"
+      );
+      if (audioBtn && isVisible(audioBtn)) {
+        playAudioBtn = audioBtn;
+      }
+
+      const heading = doc.querySelector(".question-options-heading");
+      if (heading && isVisible(heading)) {
+        progressText = cleanText(heading);
+      }
+    }
+
+    return {
+      isSpeakingPractice,
+      targetPhrase,
+      playAudioBtn,
+      progressText
     };
   }
 
@@ -662,6 +912,8 @@
       "[role='tab']",
       ".matching-option-wp",
       ".drawer-option",
+      "ef-multiple-choice-speech-task-response-option",
+      ".response-option",
       "button.selection-gap-button",
       "button.item",
       "ef-lesson-overview-step",
@@ -673,7 +925,8 @@
       "[data-testid]",
       "[class*='option']",
       "[class*='choice']",
-      "[class*='answer']",
+      "[class*='answer-option']",
+      "[class*='answer-item']",
       "[class*='card']",
       "[class*='word']",
       "[class*='chip']",
@@ -690,6 +943,7 @@
 
     const containerBlacklistSelector = [
       ".question-options",
+      ".question-options-heading",
       ".options",
       ".task-wp",
       ".contents",
@@ -698,15 +952,22 @@
       ".matching-options",
       ".drawer-options",
       ".answers-info",
+      ".correct-answers-info",
+      ".skipped-answers-info",
+      "ef-end-of-activity-summary",
+      ".summary-wp",
+      ".end-of-activity-summary",
       "ef-instructions",
       "ef-matching-task",
       "ef-dynamic-renderer",
       "ef-activity-navigator",
+      "ef-speaking-practice-task",
+      "ef-multiple-choice-speech-task",
       ".step-overview-list"
     ].join(",");
 
     const chromeNoiseRegex =
-      /^(show subtitles|hide subtitles|mute video|unmute video|play video|pause video|1x|1\.25x|1\.5x|0\.75x|0\.5x|view activity instructions|open help menu|open hint|more options|close|back)$/i;
+      /^(show subtitles|hide subtitles|mute video|unmute video|play video|pause video|1x|1\.25x|1\.5x|0\.75x|0\.5x|view activity instructions|open help menu|open hint|open calculator|more options|close|back)$/i;
 
     const rawSet = new Set();
     for (const doc of docs) {
@@ -716,9 +977,12 @@
         if (rawSet.has(node)) continue;
         const r = node.getBoundingClientRect();
         if (r.width >= 20 && r.width <= 700 && r.height >= 18 && r.height <= 220) {
-          if (window.getComputedStyle(node).cursor === "pointer") {
-            rawSet.add(node);
-          }
+          try {
+            const w = (node.ownerDocument && node.ownerDocument.defaultView) || window;
+            if (w.getComputedStyle(node).cursor === "pointer") {
+              rawSet.add(node);
+            }
+          } catch (_) {}
         }
       }
     }
@@ -744,12 +1008,37 @@
         continue;
       }
 
+      // Skip non-interactive speaking display word labels (<label class="word"> inside ef-speaking-practice-task)
+      const cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
+      const role = (el.getAttribute("role") || "").toLowerCase();
+      const testId = (el.getAttribute("data-testid") || "").toLowerCase();
+      const ariaLabel = (el.getAttribute("aria-label") || "").trim();
+      const rawText = cleanText(el);
+      if (
+        tag === "label" &&
+        /\bword\b/.test(cls) &&
+        el.closest &&
+        el.closest("ef-speaking-practice-task, span.target")
+      ) {
+        continue;
+      }
+
       // Skip known layout/wrapper containers so they never swallow child options/cards
       try {
         if (el.matches && el.matches(containerBlacklistSelector)) continue;
       } catch (_) {}
 
-      const cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
+      // Skip static non-button children inside end-of-activity summary or instructions
+      if (
+        el.closest &&
+        el.closest(
+          "ef-end-of-activity-summary, .summary-wp, .end-of-activity-summary, ef-instructions, .answers-info"
+        )
+      ) {
+        if (tag !== "button" && role !== "button") {
+          continue;
+        }
+      }
 
       // Skip already completed matching pairs
       if (
@@ -787,11 +1076,6 @@
         continue;
       }
 
-      const role = (el.getAttribute("role") || "").toLowerCase();
-      const testId = (el.getAttribute("data-testid") || "").toLowerCase();
-      const ariaLabel = (el.getAttribute("aria-label") || "").trim();
-      const rawText = cleanText(el);
-
       // Filter out irrelevant media player / header UI chrome
       if (
         chromeNoiseRegex.test(rawText) ||
@@ -817,7 +1101,9 @@
               tag !== "textarea" &&
               tag !== "button" &&
               !cls.includes("matching-option-wp") &&
-              !cls.includes("drawer-option")
+              !cls.includes("drawer-option") &&
+              tag !== "ef-multiple-choice-speech-task-response-option" &&
+              !cls.includes("response-option")
             ) {
               hasRegisteredParent = true;
               break;
@@ -885,10 +1171,11 @@
           prefix = "input";
         }
       }
-      // 7. Next / Continue / Start Next Step button
+      // 7. Next / Continue / Start Next Step / Back to lesson overview / Generate feedback button
       else if (
         cls.includes("next-task-button") ||
-        /^(next|start next step|continue|submit|check|proceed|done|finish|start lesson|try again|далее|продолжить|проверить|готово)$/i.test(
+        cls.includes("self-evaluation-submit") ||
+        /^(next|start next step|continue|submit|check|proceed|done|finish|start lesson|try again|back to lesson overview|return to unit overview|generate feedback|далее|продолжить|проверить|готово)$/i.test(
           rawText
         )
       ) {
@@ -899,7 +1186,10 @@
       else if (
         cls.includes("mic") ||
         cls.includes("record") ||
-        /\b(record|speak|microphone|start recording|stop recording|запись)\b/i.test(lowerText)
+        cls.includes("audio-recorder-btn") ||
+        /\b(record|speak|microphone|start recording|stop recording|click to record|запись)\b/i.test(
+          lowerText
+        )
       ) {
         type = "mic_btn";
         prefix = "mic";
@@ -943,14 +1233,16 @@
         type = "drop_target";
         prefix = "slot";
       }
-      // 12. Multiple choice options
+      // 12. Multiple choice options & avatar speech response options (A, B, C)
       else if (
         role === "radio" ||
         role === "checkbox" ||
         role === "option" ||
-        cls.includes("choice") ||
-        cls.includes("option") ||
-        cls.includes("answer")
+        tag === "ef-multiple-choice-speech-task-response-option" ||
+        cls.includes("response-option") ||
+        (cls.includes("choice") && !cls.includes("heading")) ||
+        (cls.includes("option") && !cls.includes("heading")) ||
+        /\b(answer-option|answer-item)\b/i.test(cls)
       ) {
         type = "choice";
         prefix = "opt";
@@ -963,10 +1255,28 @@
         prefix = "btn";
       }
 
+      let finalText = rawText;
+      if (
+        tag === "ef-multiple-choice-speech-task-response-option" ||
+        cls.includes("response-option")
+      ) {
+        const pfxEl = el.querySelector(".prefix, [class*='prefix']");
+        const cntEl = el.querySelector(".content, label, [class*='content']");
+        if (pfxEl && cntEl) {
+          const p = (pfxEl.textContent || "").replace(/[:.)-\s]+$/, "").trim().toUpperCase();
+          const c = (cntEl.textContent || "").replace(/\s+/g, " ").trim();
+          if (p && c) {
+            finalText = `${p}: ${c}`;
+          }
+        } else if (/^[A-Z]\s*[:.)-]?\s+\S/i.test(rawText)) {
+          finalText = rawText.replace(/^([A-Z])\s*[:.)-]?\s+(.*)$/i, "$1: $2");
+        }
+      }
+
       const id = `${prefix}-${counters[prefix]++}`;
       el.setAttribute("data-efekta-id", id);
       elementRegistry.set(id, el);
-      if (rawText) idToTextMap.set(id, rawText);
+      if (finalText) idToTextMap.set(id, finalText);
       registeredNodes.add(el);
 
       const selected =
@@ -977,15 +1287,18 @@
         cls.includes("active") ||
         cls.includes("checked");
 
-      const disabled =
+      let disabled =
         el.disabled === true ||
         el.getAttribute("aria-disabled") === "true" ||
         cls.includes("disabled");
+      if (type !== "mic_btn") {
+        disabled = disabled || cls.includes("no-pointer");
+      }
 
       elements.push({
         id,
         type,
-        text: rawText.slice(0, 140),
+        text: finalText.slice(0, 140),
         tag,
         x: Math.round(rect.left + rect.width / 2),
         y: Math.round(rect.top + rect.height / 2),
@@ -1013,7 +1326,10 @@
     }
     const prompt = Array.from(new Set(promptCandidates)).slice(0, 3).join(" | ");
 
-    // Extract context sentences (with inline [input-N] / [slot-N] placeholders)
+    // Extract speaking practice phrase if present
+    const speakingInfo = extractSpeakingInfo(docs);
+
+    // Extract context sentences (with inline [input-N] / [slot-N] placeholders, without hidden sizing text!)
     const contextNodes = [];
     for (const doc of docs) {
       contextNodes.push(
@@ -1027,6 +1343,15 @@
 
     const contextLines = [];
     const seenContext = new Set();
+
+    if (speakingInfo.targetPhrase) {
+      seenContext.add(speakingInfo.targetPhrase);
+      contextLines.push(speakingInfo.targetPhrase);
+      if (speakingInfo.progressText) {
+        contextLines.push(`Progress: ${speakingInfo.progressText}`);
+      }
+    }
+
     for (const node of contextNodes) {
       let textWithBlanks = "";
       const walker = document.createTreeWalker(
@@ -1034,13 +1359,37 @@
         NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
         {
           acceptNode(n) {
-            const p = n.parentElement;
+            const p = n.nodeType === Node.ELEMENT_NODE ? n : n.parentElement;
+            if (!p) return NodeFilter.FILTER_ACCEPT;
             if (
-              p &&
               p.closest &&
-              p.closest(".cdk-visually-hidden, .sr-only, .screen-reader-overview, ef-icon, svg")
+              p.closest(
+                ".cdk-visually-hidden, .sr-only, .screen-reader-overview, [aria-hidden='true'], [hidden], .longest-option, ef-icon, svg"
+              )
             ) {
               return NodeFilter.FILTER_REJECT;
+            }
+            // Skip any hidden width-sizing spans inside selection-gap wrappers
+            if (n.nodeType === Node.TEXT_NODE && n.parentElement) {
+              const pe = n.parentElement;
+              if (
+                pe.closest &&
+                pe.closest("ef-selection-gap, .selection-gap-wrapper, .selection-gap") &&
+                !pe.closest("[data-efekta-id^='slot-']")
+              ) {
+                return NodeFilter.FILTER_REJECT;
+              }
+              try {
+                const w = (doc.defaultView) || window;
+                const st = w.getComputedStyle(pe);
+                if (
+                  st.display === "none" ||
+                  st.visibility === "hidden" ||
+                  parseFloat(st.opacity) === 0
+                ) {
+                  return NodeFilter.FILTER_REJECT;
+                }
+              } catch (_) {}
             }
             return NodeFilter.FILTER_ACCEPT;
           }
@@ -1116,56 +1465,104 @@
       (e.className || "").includes("selection-gap-button")
     );
 
+    // Also inspect hidden drawer options if selection_gaps drawer hasn't been opened yet
+    let drawerChoiceStrings = choiceEls.map((o) => `${o.id}: ${o.text}`);
+    if (hasSelectionGaps && drawerChoiceStrings.length === 0) {
+      const hiddenDrawerOpts = [];
+      for (const doc of docs) {
+        doc.querySelectorAll("div.drawer-option, .drawer-option").forEach((el) => {
+          const t = (el.textContent || "").trim().replace(/\s+/g, " ");
+          if (t && !hiddenDrawerOpts.includes(t)) hiddenDrawerOpts.push(t);
+        });
+      }
+      if (hiddenDrawerOpts.length > 0) {
+        drawerChoiceStrings = hiddenDrawerOpts.map((t, idx) => `opt-${idx + 1}: ${t}`);
+      }
+    }
+
     // Precise Exercise Type & Instant Agent Hint
     let exerciseType = "unknown";
     let actionTemplate = "";
     let summary = "";
 
-    if (hasMic) {
-      exerciseType = "speaking_avatar";
-      if (skipBtn) {
-        actionTemplate = `efekta batch "click ${skipBtn.id}; next" --json`;
-        summary = "Optional speaking task with SKIP button available.";
+    const isActivitySummary = docs.some((doc) => {
+      const summaryEl = doc.querySelector(
+        "ef-end-of-activity-summary, .tasks-wp.summary-shown, .summary-wp, .summary-shown"
+      );
+      return summaryEl && isVisible(summaryEl);
+    });
+
+    if (isActivitySummary) {
+      exerciseType = "passive_screen";
+      actionTemplate = `efekta next --json -c`;
+      summary = `End of activity summary screen (${nextBtn ? nextBtn.id : "unlocked"}). Run 'efekta next --json -c' to continue.`;
+    } else if (hasMic) {
+      const speechChoices = choiceEls.filter(
+        (e) =>
+          e.tag === "ef-multiple-choice-speech-task-response-option" ||
+          (e.className || "").includes("response-option") ||
+          (e.text && /^[A-Z]\s*:/i.test(e.text))
+      );
+
+      if (speechChoices.length > 0) {
+        exerciseType = "speaking_avatar";
+        actionTemplate = `efekta batch "speak opt-1; next" --json -c`;
+        summary = `Avatar dialogue with ${speechChoices.length} options (${speechChoices.map((c) => c.text.slice(0, 2)).join(", ")}). Run 'efekta batch "speak opt-X; next" --json -c' or 'speak B; next' to select and speak your chosen option.`;
+      } else if (speakingInfo.isSpeakingPractice || speakingInfo.targetPhrase || speakingInfo.playAudioBtn) {
+        exerciseType = "speaking_practice";
+        actionTemplate = `efekta batch "speak all; next" --json -c`;
+        summary = speakingInfo.targetPhrase
+          ? `Pronunciation speaking drill ("${speakingInfo.targetPhrase}"). Run 'efekta batch "speak all; next" --json -c' to speak with real English audio${skipBtn ? ` (or 'click ${skipBtn.id}; next' to skip)` : ""}.`
+          : `Speaking drill. Run 'efekta batch "speak all; next" --json -c' to speak with real English audio.`;
       } else {
-        actionTemplate = `efekta batch "wait video-end; solve speak" --json`;
-        summary = "Mandatory AI avatar dialogue: wait for video-end, then run solve speak to unlock manual choices.";
+        exerciseType = "speaking_avatar";
+        if (skipBtn) {
+          actionTemplate = `efekta batch "click ${skipBtn.id}; next" --json -c`;
+          summary = `Speaking task (skip: ${skipBtn.id}). Run 'efekta batch "speak; next" --json -c' or 'click ${skipBtn.id}; next' to skip.`;
+        } else if (videoStatus.isPlaying || (videoStatus.hasVideo && !videoStatus.ended)) {
+          actionTemplate = `efekta batch "wait video-end; next" --json -c`;
+          summary = "Avatar video is playing. Run 'efekta batch \"wait video-end; next\" --json -c' to wait for dialogue options.";
+        } else {
+          actionTemplate = `efekta batch "speak; next" --json -c`;
+          summary = "Speaking task. Run 'efekta batch \"speak; next\" --json -c' to speak English.";
+        }
       }
     } else if (hasMatchingCards && slotEls.length > 0 && dragEls.length > 0) {
       exerciseType = "matching_pairs";
-      actionTemplate = `efekta batch "pair slot-1:item-X, slot-2:item-Y; next" --json`;
+      actionTemplate = `efekta batch "pair slot-1:item-X, slot-2:item-Y; next" --json -c`;
       summary = `Match ${slotEls.length} left slots with ${dragEls.length} right items in one batch, ending with '; next'.`;
     } else if (hasSelectionGaps && slotEls.length > 0) {
       exerciseType = "selection_gaps";
-      actionTemplate = `efekta batch "gaps word1, word2, word3; next" --json`;
+      actionTemplate = `efekta batch "gaps word1, word2, word3; next" --json -c`;
       summary = `Fill ${slotEls.length} gap buttons in order using 'gaps word1, word2...; next'.`;
     } else if (inputEls.length > 0) {
       exerciseType = "fill_in_the_blanks";
-      actionTemplate = `efekta batch "gaps word1, word2; next" --json`;
+      actionTemplate = `efekta batch "gaps word1, word2; next" --json -c`;
       summary = `Type ${inputEls.length} blanks in order using 'gaps word1, word2; next'.`;
     } else if (dragEls.length > 0 && slotEls.length > 1) {
       exerciseType = "categorize_columns";
-      actionTemplate = `efekta batch "sort slot-1:item-1,item-2; sort slot-2:item-3,item-4; next" --json`;
+      actionTemplate = `efekta batch "sort slot-1:item-1,item-2; sort slot-2:item-3,item-4; next" --json -c`;
       summary = `Sort ${dragEls.length} items into ${slotEls.length} categories in one batch, ending with '; next'.`;
     } else if (dragEls.length > 0) {
       exerciseType = "order_sentence";
-      actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json`;
+      actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json -c`;
       summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
     } else if (choiceEls.length >= 2) {
       exerciseType = "multiple_choice";
-      actionTemplate = `efekta batch "pick opt-1; next" --json`;
+      actionTemplate = `efekta batch "pick opt-1; next" --json -c`;
       summary = `Pick the right option(s) from ${choiceEls.length} choices and auto-advance with '; next'.`;
     } else if (stageEls.length >= 2 && !nextBtn) {
       exerciseType = "lesson_overview";
-      actionTemplate = `efekta next --json`;
-      summary = `Lesson overview screen (${stageEls.length} steps). Run 'efekta next --json' to enter the next incomplete step.`;
+      actionTemplate = `efekta next --json -c`;
+      summary = `Lesson overview screen (${stageEls.length} steps). Run 'efekta next --json -c' to enter the next incomplete step.`;
     } else if (nextBtn) {
       exerciseType = "passive_screen";
-      actionTemplate = `efekta next --json`;
-      summary = `Passive/reading/summary screen (${nextBtn.id} unlocked). Run 'efekta next --json' to fast-forward to the next interactive exercise.`;
+      actionTemplate = `efekta next --json -c`;
+      summary = `Passive/reading/summary screen (${nextBtn.id} unlocked). Run 'efekta next --json -c' to fast-forward to the next interactive exercise.`;
     } else if (videoStatus.hasVideo) {
       exerciseType = "video_stage";
-      actionTemplate = `efekta next --json`;
-      summary = `Video stage. Run 'efekta next --json' or 'efekta wait video-end'.`;
+      actionTemplate = `efekta next --json -c`;
+      summary = `Video stage. Run 'efekta next --json -c' or 'efekta wait video-end'.`;
     }
 
     const agentHint = {
@@ -1174,9 +1571,42 @@
       summary,
       slots: slotEls.map((s) => `${s.id}: ${s.text || "___"}`),
       items: dragEls.map((i) => `${i.id}: ${i.text}`),
-      options: choiceEls.map((o) => `${o.id}: ${o.text}`),
+      options: drawerChoiceStrings,
       inputs: inputEls.map((inp) => `${inp.id}: ${inp.text || "___"}`)
     };
+
+    let canProceed = !!nextBtn;
+    if (exerciseType === "speaking_practice") {
+      let isBusy = false;
+      let isCorrect = false;
+      let isIncorrect = false;
+      for (const doc of docs) {
+        if (
+          doc.querySelector(
+            ".speech-action-control.recording, .speech-action-control.waiting_for_assessment"
+          )
+        ) {
+          isBusy = true;
+        }
+        if (
+          doc.querySelector(
+            ".speech-action-control.correct, .speech-action-control.playbackEnabled.correct"
+          )
+        ) {
+          isCorrect = true;
+        }
+        if (doc.querySelector(".speech-action-control.incorrect")) {
+          isIncorrect = true;
+        }
+      }
+      if (isBusy || isIncorrect) {
+        canProceed = false;
+      } else if (isCorrect) {
+        canProceed = !!nextBtn;
+      } else if (hasMic) {
+        canProceed = false;
+      }
+    }
 
     return {
       url: window.location.href,
@@ -1187,11 +1617,35 @@
       feedback,
       agentHint,
       video: videoStatus,
-      canProceed: !!nextBtn,
+      canProceed,
       nextButtonId: nextBtn ? nextBtn.id : "",
       elementsCount: elements.length,
       elements
     };
+  }
+
+  // If on selection_gaps and options list is still empty, auto-peek slot-1 so the word bank is visible immediately!
+  async function autoPeekSelectionGapOptions(st) {
+    if (!st || st.exerciseType !== "selection_gaps") return st;
+    if (st.agentHint && st.agentHint.options && st.agentHint.options.length > 0) return st;
+
+    const docs = getAllDocs();
+    for (const doc of docs) {
+      const firstGap = doc.querySelector("button.selection-gap-button");
+      if (firstGap && isVisible(firstGap)) {
+        await simulateClick(firstGap);
+        const start = Date.now();
+        while (Date.now() - start < 450) {
+          await sleep(35);
+          const opts = Array.from(
+            doc.querySelectorAll("div.drawer-option, .drawer-option")
+          ).filter(isVisible);
+          if (opts.length > 0) break;
+        }
+        return inspectState();
+      }
+    }
+    return st;
   }
 
   // Wait for a condition ("video-end", "next", "unlocked", or duration in ms)
@@ -1221,7 +1675,7 @@
           return { success: true, message: `Next button unlocked (${st.nextButtonId})` };
         }
       }
-      await sleep(120);
+      await sleep(100);
     }
     return {
       success: false,
@@ -1234,8 +1688,8 @@
     if (!targetSpec) {
       return { success: false, error: "No target specified for pick/click" };
     }
+    await dismissOverlaysIfPresent();
     const rawStr = String(targetSpec).trim();
-    // If coordinate "x,y", treat as single target
     const isCoord = /^\d+\s*,\s*\d+$/.test(rawStr);
     const targets = isCoord
       ? [rawStr]
@@ -1245,11 +1699,11 @@
           .filter(Boolean);
 
     // Snapshot DOM nodes & texts BEFORE clicking so DOM re-indexing never shifts IDs
-    inspectState();
+    if (!inBatchExecution) inspectState();
     const snapshots = targets.map((t) => ({
       target: t,
       el: resolveElement(t),
-      text: idToTextMap.get(t) || t
+      text: (inBatchExecution && batchTextSnapshot.get(t)) || idToTextMap.get(t) || t
     }));
 
     const clicked = [];
@@ -1270,9 +1724,9 @@
       await simulateClick(el);
       clicked.push(`${snap.target} ("${cleanText(el)}")`);
       if (i + 1 < snapshots.length) {
-        await sleep(220);
+        await sleep(190);
       } else {
-        await sleep(160);
+        await sleep(140);
       }
     }
     await waitUntilUnlocked(1600);
@@ -1288,7 +1742,8 @@
     if (!specStr) {
       return { success: false, error: "Usage: pair slot-1:item-3, slot-2:item-1" };
     }
-    inspectState();
+    await dismissOverlaysIfPresent();
+    if (!inBatchExecution) inspectState();
     const rawPairs = String(specStr)
       .split(",")
       .map((s) => s.trim())
@@ -1309,8 +1764,14 @@
         rightKey,
         leftEl,
         rightEl,
-        leftText: idToTextMap.get(leftKey) || (leftEl ? cleanText(leftEl) : leftKey),
-        rightText: idToTextMap.get(rightKey) || (rightEl ? cleanText(rightEl) : rightKey)
+        leftText:
+          (inBatchExecution && batchTextSnapshot.get(leftKey)) ||
+          idToTextMap.get(leftKey) ||
+          (leftEl ? cleanText(leftEl) : leftKey),
+        rightText:
+          (inBatchExecution && batchTextSnapshot.get(rightKey)) ||
+          idToTextMap.get(rightKey) ||
+          (rightEl ? cleanText(rightEl) : rightKey)
       });
     }
 
@@ -1337,14 +1798,14 @@
         };
       }
       await simulateClick(lEl);
-      await sleep(95);
+      await sleep(85);
       await simulateClick(rEl);
       matched.push(`${p.leftText} -> ${p.rightText}`);
 
-      // Wait up to 650ms for pair animation (.correct) to finish
+      // Wait up to 600ms for pair animation (.correct) to finish
       const start = Date.now();
-      while (Date.now() - start < 650) {
-        await sleep(45);
+      while (Date.now() - start < 600) {
+        await sleep(40);
         const lCls = (lEl.className || "").toLowerCase();
         const rCls = (rEl.className || "").toLowerCase();
         if (lCls.includes("correct") || rCls.includes("correct") || !lEl.isConnected) {
@@ -1352,7 +1813,7 @@
         }
       }
     }
-    await sleep(120);
+    await sleep(100);
     return {
       success: true,
       message: `Matched ${matched.length} pairs: ${matched.join(" | ")}`,
@@ -1365,10 +1826,12 @@
     if (!specStr) {
       return { success: false, error: "Usage: sort slot-1:item-1,item-2" };
     }
-    inspectState();
+    await dismissOverlaysIfPresent();
+    if (!inBatchExecution) inspectState();
 
-    // Support multiple groups separated by "|" or space-separated "slot-X:..."
-    const groupsRaw = String(specStr)
+    // Support multiple groups separated by "|" OR space-separated "slot-1:item-1,item-2 slot-2:item-3,item-4"
+    const normalized = String(specStr).replace(/\s+(?=(?:slot|col|cat)-\d+\s*:)/gi, " | ");
+    const groupsRaw = normalized
       .split("|")
       .map((s) => s.trim())
       .filter(Boolean);
@@ -1385,13 +1848,18 @@
         .filter(Boolean);
       const slotEl = resolveElement(slotKey);
       const slotText =
-        idToTextMap.get(slotKey) || (slotEl ? cleanText(slotEl) : slotKey);
+        (inBatchExecution && batchTextSnapshot.get(slotKey)) ||
+        idToTextMap.get(slotKey) ||
+        (slotEl ? cleanText(slotEl) : slotKey);
       const items = itemKeys.map((k) => {
         const el = resolveElement(k);
         return {
           key: k,
           el,
-          text: idToTextMap.get(k) || (el ? cleanText(el) : k)
+          text:
+            (inBatchExecution && batchTextSnapshot.get(k)) ||
+            idToTextMap.get(k) ||
+            (el ? cleanText(el) : k)
         };
       });
       groups.push({ slotKey, slotEl, slotText, items });
@@ -1405,7 +1873,7 @@
     for (const grp of groups) {
       for (const it of grp.items) {
         await waitUntilUnlocked(1800);
-        let itemEl = it.el && it.el.isConnected ? it.el : null;
+        let itemEl = it.el && it.el.isConnected && isVisible(it.el) ? it.el : null;
         if (!itemEl) {
           itemEl = findInteractiveByText(it.text) || resolveElement(it.key);
         }
@@ -1422,20 +1890,20 @@
         }
 
         await simulateClick(itemEl);
-        await sleep(110);
+        await sleep(95);
         await simulateClick(slotEl);
         sorted.push(`${it.text} -> ${grp.slotText}`);
 
-        // Wait up to 750ms until item is removed from DOM or animation finishes
+        // Wait up to 700ms until item is removed from DOM or animation finishes
         const start = Date.now();
-        while (Date.now() - start < 750) {
-          await sleep(45);
+        while (Date.now() - start < 700) {
+          await sleep(40);
           if (!itemEl.isConnected || !isVisible(itemEl)) break;
         }
         await waitUntilUnlocked(1500);
       }
     }
-    await sleep(100);
+    await sleep(80);
     return {
       success: true,
       message: `Sorted ${sorted.length} items: ${sorted.join(" | ")}`,
@@ -1444,10 +1912,13 @@
   }
 
   // Turbo Action 4: Fill selection-gap drawers or text blanks in order ("word1, word2, word3")
+  // Immune to DOM replacement when filled gaps turn into spans, and never double-clicks an already-open gap!
   async function executeGaps(specStr) {
     if (!specStr) {
       return { success: false, error: "Usage: gaps word1, word2, word3" };
     }
+    await dismissOverlaysIfPresent();
+
     const entries = String(specStr)
       .split(",")
       .map((s) => s.trim())
@@ -1456,60 +1927,102 @@
     const filled = [];
     const docs = getAllDocs();
 
-    for (let i = 0; i < entries.length; i++) {
-      let targetKey = "";
-      let word = entries[i];
-      const eqIdx = word.indexOf("=");
-      if (eqIdx !== -1 && /^(slot|input)-\d+$/i.test(word.slice(0, eqIdx).trim())) {
-        targetKey = word.slice(0, eqIdx).trim();
-        word = word.slice(eqIdx + 1).trim();
-      }
-      word = word.replace(/^["']|["']$/g, "").trim();
+    // Snapshot all selection-gap buttons and inputs upfront before filling any gap!
+    const initialGapButtons = [];
+    for (const doc of docs) {
+      initialGapButtons.push(
+        ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(isVisible)
+      );
+    }
+    const slotDomMap = new Map();
+    initialGapButtons.forEach((btn, idx) => {
+      slotDomMap.set(`slot-${idx + 1}`, btn);
+      const attrId = btn.getAttribute("data-efekta-id");
+      if (attrId) slotDomMap.set(attrId, btn);
+    });
 
-      // Case A: Selection-gap buttons + bottom .drawer-option drawer
-      let gapButtons = [];
+    const getVisibleDrawerOptions = () => {
+      const list = [];
       for (const doc of docs) {
-        gapButtons.push(
-          ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(
+        list.push(
+          ...Array.from(doc.querySelectorAll("div.drawer-option, .drawer-option")).filter(
             isVisible
           )
         );
       }
+      return list;
+    };
 
-      if (gapButtons.length > 0) {
-        // Check if drawer options are already open
-        const getVisibleDrawerOptions = () => {
-          const list = [];
+    for (let i = 0; i < entries.length; i++) {
+      await waitUntilUnlocked(1500);
+      let targetKey = "";
+      let word = entries[i];
+      const eqIdx = word.indexOf("=");
+      if (eqIdx !== -1 && /^(slot|input)-\d+$/i.test(word.slice(0, eqIdx).trim())) {
+        targetKey = word.slice(0, eqIdx).trim().toLowerCase();
+        word = word.slice(eqIdx + 1).trim();
+      }
+      word = word.replace(/^["']|["']$/g, "").trim();
+
+      if (initialGapButtons.length > 0) {
+        // Resolve the exact gap button for this iteration from our upfront snapshot
+        let gapBtn =
+          (targetKey && slotDomMap.get(targetKey)) ||
+          initialGapButtons[i] ||
+          null;
+
+        if (!gapBtn || !gapBtn.isConnected || !isVisible(gapBtn)) {
+          // Fallback: find the first currently visible unfilled gap button
+          const currentButtons = [];
           for (const doc of docs) {
-            list.push(
-              ...Array.from(doc.querySelectorAll("div.drawer-option, .drawer-option")).filter(
+            currentButtons.push(
+              ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(
                 isVisible
               )
             );
           }
-          return list;
-        };
+          gapBtn =
+            currentButtons.find((b) => {
+              const t = cleanText(b).toLowerCase();
+              const cls = (b.className || "").toLowerCase();
+              return (
+                !t ||
+                t.includes("blank") ||
+                /^[_.\s-]+$/.test(t) ||
+                cls.includes("empty") ||
+                !cls.includes("filled")
+              );
+            }) || currentButtons[0];
+        }
 
         let drawerOpts = getVisibleDrawerOptions();
-        if (drawerOpts.length === 0 || targetKey) {
-          let gapBtn = targetKey ? resolveElement(targetKey) : null;
-          if (!gapBtn) {
-            // Find first unfilled gap button (no text or placeholder)
-            gapBtn =
-              gapButtons.find((b) => {
-                const t = cleanText(b);
-                const cls = (b.className || "").toLowerCase();
-                return !t || /^[_.\s-]+$/.test(t) || cls.includes("empty") || !cls.includes("filled");
-              }) || gapButtons[Math.min(i, gapButtons.length - 1)];
+        const isGapAlreadySelected =
+          gapBtn &&
+          drawerOpts.length > 0 &&
+          ((gapBtn.className || "").toLowerCase().includes("selected") ||
+            (gapBtn.className || "").toLowerCase().includes("active") ||
+            gapBtn.getAttribute("aria-expanded") === "true" ||
+            (i === 0 && !targetKey) ||
+            (i === 0 && targetKey === "slot-1"));
+
+        if (!isGapAlreadySelected && gapBtn) {
+          await simulateClick(gapBtn);
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < 650) {
+            await sleep(35);
+            drawerOpts = getVisibleDrawerOptions();
+            if (drawerOpts.length > 0) break;
           }
-          if (gapBtn) {
-            await simulateClick(gapBtn);
-            const waitStart = Date.now();
-            while (Date.now() - waitStart < 600) {
-              await sleep(35);
-              drawerOpts = getVisibleDrawerOptions();
-              if (drawerOpts.length > 0) break;
-            }
+        }
+
+        // If drawer still didn't open (e.g. first click closed a different drawer), click gapBtn once more
+        if (drawerOpts.length === 0 && gapBtn) {
+          await simulateClick(gapBtn);
+          const waitStart = Date.now();
+          while (Date.now() - waitStart < 650) {
+            await sleep(35);
+            drawerOpts = getVisibleDrawerOptions();
+            if (drawerOpts.length > 0) break;
           }
         }
 
@@ -1530,11 +2043,18 @@
 
         await simulateClick(matchOpt);
         filled.push(word);
-        await sleep(260);
+
+        // Wait up to 400ms for drawer selection to commit before moving to next gap
+        const commitStart = Date.now();
+        while (Date.now() - commitStart < 400) {
+          await sleep(40);
+          if (!matchOpt.isConnected || !isVisible(matchOpt)) break;
+        }
+        await sleep(120);
         continue;
       }
 
-      // Case B: Standard <input> / [contenteditable] blanks
+      // Case B: Standard <input> / <textarea> / [contenteditable] blanks
       const st = inspectState();
       const inputEls = st.elements.filter((e) => e.type === "input");
       const targetId =
@@ -1547,9 +2067,9 @@
           filled
         };
       }
-      await simulateType(inputDom, word, 12);
+      await simulateType(inputDom, word, 6);
       filled.push(`${targetId}=${word}`);
-      await sleep(320);
+      await sleep(180);
     }
 
     return {
@@ -1570,10 +2090,29 @@
       t === "fill_in_the_blanks" ||
       t === "order_sentence" ||
       t === "multiple_choice" ||
+      t === "speaking_practice" ||
       t === "speaking_avatar"
     ) {
+      // Self-evaluation screen ("How did you find the task?") is handled automatically by executeAutoNext!
+      if (
+        t === "multiple_choice" &&
+        /how did you find the task/i.test(st.prompt || "")
+      ) {
+        return false;
+      }
+      // If end-of-activity summary is shown, it's a passive screen!
+      const docs = getAllDocs();
+      if (
+        docs.some((d) =>
+          d.querySelector(
+            "ef-end-of-activity-summary, .tasks-wp.summary-shown, .summary-wp, .summary-shown"
+          )
+        )
+      ) {
+        return false;
+      }
       // If canProceed is ALREADY true (e.g. "Correct answers" review screen where old options are disabled), it's passive!
-      if (st.canProceed && t !== "speaking_avatar") {
+      if (st.canProceed && t !== "speaking_avatar" && t !== "speaking_practice") {
         return false;
       }
       return true;
@@ -1583,17 +2122,19 @@
 
   // Turbo Action 5: Auto-Fast-Forward ("next" / "ff")
   // Advances from current screen and automatically glides through consecutive passive screens
-  // (reading cards, "Correct answers" review, "Step passed!" summary, Lesson Overview)
-  async function executeAutoNext(maxHops = 7) {
+  // (reading cards, "Correct answers" review, self-evaluation, AI feedback, "Step passed!" summary, Lesson Overview)
+  async function executeAutoNext(maxHops = 9) {
     const autoReadNotes = [];
     let hops = 0;
 
     for (let step = 0; step < maxHops; step++) {
+      await dismissOverlaysIfPresent();
       await waitUntilUnlocked(1500);
       const st = inspectState();
 
       // On step > 0, stop immediately as soon as we land on an interactive exercise!
       if (step > 0 && isInteractiveExercise(st)) {
+        await autoPeekSelectionGapOptions(st);
         return {
           success: true,
           message: `Advanced ${hops} screen(s) to ${st.exerciseType}`,
@@ -1615,8 +2156,64 @@
 
       let clickedTarget = "";
 
-      // Priority 1: Active Next / Start next step / Continue button
-      if (st.canProceed && st.nextButtonId) {
+      // Priority 0.5: Fast-forward passive video stage if video is blocking Next button
+      if (!st.canProceed && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo && !st.video.ended))) {
+        const docs = getAllDocs();
+        let seeked = false;
+        for (const doc of docs) {
+          doc.querySelectorAll("video").forEach((v) => {
+            try {
+              if (isFinite(v.duration) && v.duration > 0 && !v.ended) {
+                v.currentTime = Math.max(0, v.duration - 0.25);
+                v.play().catch(() => {});
+                seeked = true;
+              }
+            } catch (_) {}
+          });
+        }
+        if (seeked) {
+          await sleep(600);
+          const afterSeekSt = inspectState();
+          if (afterSeekSt.nextButtonId) {
+            const btn = resolveElement(afterSeekSt.nextButtonId);
+            if (btn) {
+              await simulateClick(btn);
+              clickedTarget = afterSeekSt.nextButtonId;
+            }
+          }
+        }
+      }
+
+      // Priority 0: Self-evaluation screen ("How did you find the task?") -> auto-pick option & click "Generate feedback"
+      if (/how did you find the task/i.test(st.prompt || "")) {
+        const docs = getAllDocs();
+        for (const doc of docs) {
+          const evalOpts = Array.from(
+            doc.querySelectorAll("button.self-evaluation-option, .self-evaluation-option")
+          ).filter(isVisible);
+          if (evalOpts.length > 0) {
+            const pickEl = evalOpts[1] || evalOpts[0];
+            await simulateClick(pickEl);
+            await sleep(160);
+          }
+          const genBtn = doc.querySelector("button.self-evaluation-submit, .self-evaluation-submit");
+          if (genBtn && isVisible(genBtn)) {
+            await simulateClick(genBtn);
+            clickedTarget = "self-evaluation-submit";
+            // Wait up to 4.5s for Efekta's AI feedback screen (next-1) to appear
+            const waitStart = Date.now();
+            while (Date.now() - waitStart < 4500) {
+              await sleep(200);
+              const checkSt = inspectState();
+              if (checkSt.canProceed) break;
+            }
+            break;
+          }
+        }
+      }
+
+      // Priority 1: Active Next / Start next step / Continue / Back to lesson overview button
+      if (!clickedTarget && st.canProceed && st.nextButtonId) {
         const btn = resolveElement(st.nextButtonId);
         if (btn) {
           await simulateClick(btn);
@@ -1624,10 +2221,19 @@
         }
       }
 
-      // Priority 2: Lesson Overview screen -> click first incomplete ef-lesson-overview-step
+      // Priority 2: Lesson Overview screen -> click first incomplete ef-lesson-overview-step (or Return to unit overview if all done)
       if (!clickedTarget) {
         const docs = getAllDocs();
         for (const doc of docs) {
+          const returnBtn = Array.from(doc.querySelectorAll("button.primary, button")).find(
+            (b) => isVisible(b) && /^return to unit overview$/i.test(cleanText(b))
+          );
+          if (returnBtn) {
+            await simulateClick(returnBtn);
+            clickedTarget = "return-to-unit-overview";
+            break;
+          }
+
           const steps = Array.from(
             doc.querySelectorAll("ef-lesson-overview-step")
           ).filter(isVisible);
@@ -1640,17 +2246,21 @@
                   !cls.includes("completed") &&
                   !cls.includes("passed") &&
                   !txt.includes("completed") &&
-                  !s.querySelector(".completed, .passed, [class*='check']")
+                  !s.querySelector(".completed, .passed, [class*='check'], [class*='is-passed']")
                 );
-              }) || steps[0];
-            await simulateClick(incomplete);
-            clickedTarget = "lesson-overview-step";
-            break;
+              }) || null;
+            if (incomplete) {
+              const target = incomplete.querySelector(".content, .step, div") || incomplete;
+              await simulateClick(target);
+              await simulateClick(incomplete);
+              clickedTarget = "lesson-overview-step";
+              break;
+            }
           }
         }
       }
 
-      // Priority 3: Optional speaking task with SKIP button on step 0
+      // Priority 3: Optional speaking task with SKIP button on step 0 when 'next' is explicitly invoked
       if (!clickedTarget && step === 0) {
         const skipEl = st.elements.find((e) => e.type === "skip_btn" && !e.disabled);
         if (skipEl) {
@@ -1676,10 +2286,12 @@
       hops++;
 
       // Wait for screen transition (poll until DOM changes and settles)
-      await sleep(380);
+      await sleep(340);
       await waitUntilUnlocked(1500);
+      await dismissOverlaysIfPresent();
       const afterSt = inspectState();
       if (isInteractiveExercise(afterSt)) {
+        await autoPeekSelectionGapOptions(afterSt);
         return {
           success: true,
           message: `Advanced ${hops} screen(s) to ${afterSt.exerciseType}`,
@@ -1687,11 +2299,11 @@
           autoReadNotes
         };
       }
-      // Give Angular an extra 220ms if screen is still transitioning
-      await sleep(220);
+      await sleep(200);
     }
 
     const finalSt = inspectState();
+    await autoPeekSelectionGapOptions(finalSt);
     return {
       success: true,
       message: `Fast-forwarded ${hops} screen(s) (current: ${finalSt.exerciseType})`,
@@ -1700,8 +2312,400 @@
     };
   }
 
+  // Turbo Action 6: Real-Speech Voice Engine ("speak [text|all|ref]")
+  // Speaks a single phrase using either the page's own native reference audio ("Play audio")
+  // or synthesized English TTS via the Go daemon (/api/tts), streaming into the one-shot armed microphone!
+  async function speakSinglePhrase(customSpec = "") {
+    await dismissOverlaysIfPresent();
+    const log = [];
+
+    const media = getMediaStatus();
+    if (media.isPlaying && media.hasVideo) {
+      log.push("Waiting for avatar video to finish speaking...");
+      await waitForCondition("video-end", 20000);
+    }
+
+    const docs = getAllDocs();
+    const speakingInfo = extractSpeakingInfo(docs);
+    const st = inspectState();
+
+    const rawSpec = String(customSpec || "").trim();
+    const isAutoOrRef =
+      !rawSpec ||
+      rawSpec.toLowerCase() === "auto" ||
+      rawSpec.toLowerCase() === "all" ||
+      rawSpec.toLowerCase() === "ref" ||
+      rawSpec.toLowerCase() === "reference";
+
+    // 1. Resolve avatar multiple-choice response option (opt-X, A/B/C, 1/2/3, text match)
+    let chosenOptionEl = null;
+    let chosenOptionText = "";
+
+    const choiceEntries = Array.from(elementRegistry.entries()).filter(([id, el]) => {
+      if (!el) return false;
+      const tag = (el.tagName || "").toLowerCase();
+      const cls = (typeof el.className === "string" ? el.className : "").toLowerCase();
+      return (
+        tag === "ef-multiple-choice-speech-task-response-option" ||
+        cls.includes("response-option") ||
+        id.startsWith("opt-")
+      );
+    });
+
+    if (rawSpec && !isAutoOrRef) {
+      const s = rawSpec.toLowerCase().replace(/^["']|["']$/g, "").trim();
+      // Match by exact ID ("opt-2")
+      for (const [id, el] of choiceEntries) {
+        if (id.toLowerCase() === s) {
+          chosenOptionEl = el;
+          chosenOptionText = idToTextMap.get(id) || cleanText(el);
+          break;
+        }
+      }
+      // Match by single letter ("a", "b", "c")
+      if (!chosenOptionEl && /^[a-z]$/i.test(s)) {
+        for (const [id, el] of choiceEntries) {
+          const t = idToTextMap.get(id) || cleanText(el);
+          if (new RegExp(`^${s}\\s*[:.)-]`, "i").test(t)) {
+            chosenOptionEl = el;
+            chosenOptionText = t;
+            break;
+          }
+        }
+      }
+      // Match by single digit ("1", "2", "3") -> maps to opt-1, opt-2...
+      if (!chosenOptionEl && /^[1-9]$/.test(s)) {
+        const targetId = `opt-${s}`;
+        for (const [id, el] of choiceEntries) {
+          if (id.toLowerCase() === targetId) {
+            chosenOptionEl = el;
+            chosenOptionText = idToTextMap.get(id) || cleanText(el);
+            break;
+          }
+        }
+      }
+      // Match by substring in option text
+      if (!chosenOptionEl && choiceEntries.length > 0) {
+        for (const [id, el] of choiceEntries) {
+          const t = idToTextMap.get(id) || cleanText(el);
+          if (t.toLowerCase().includes(s)) {
+            chosenOptionEl = el;
+            chosenOptionText = t;
+            break;
+          }
+        }
+      }
+    } else if (choiceEntries.length > 0 && !speakingInfo.isSpeakingPractice) {
+      // Default to first option if avatar dialogue options are on screen and no specific spec was provided
+      chosenOptionEl = choiceEntries[0][1];
+      chosenOptionText = idToTextMap.get(choiceEntries[0][0]) || cleanText(chosenOptionEl);
+    }
+
+    let targetPhrase = "";
+    if (chosenOptionEl) {
+      // Simulate click on the chosen option card so Angular registers the selection
+      await simulateClick(chosenOptionEl);
+      await sleep(120);
+      // Strip any letter prefix ("A: ", "B: ", "C. ") so TTS speaks only the clean sentence
+      targetPhrase = chosenOptionText.replace(/^[A-Z]\s*[:.)-]\s*/i, "").trim();
+      log.push(`Selected dialogue option: "${chosenOptionText}" (speaking: "${targetPhrase}")`);
+    } else if (!isAutoOrRef && rawSpec) {
+      targetPhrase = rawSpec.replace(/^["']|["']$/g, "").trim();
+    } else {
+      targetPhrase =
+        speakingInfo.targetPhrase ||
+        (st.contextText && st.contextText[0]) ||
+        st.prompt ||
+        "I think that is a great point and I completely agree.";
+    }
+
+    const explicitText = isAutoOrRef ? "" : rawSpec.replace(/^["']|["']$/g, "").trim();
+    let preparedClip = null;
+
+    try {
+      // Strategy 1: Native Reference Audio Loopback (if "Play audio" button exists and no custom option/text chosen)
+      if (!chosenOptionEl && !explicitText && speakingInfo.playAudioBtn) {
+        const sinceTs = Date.now() - 50;
+        log.push("Clicking 'Play audio' to capture native reference audio...");
+        await simulateClick(speakingInfo.playAudioBtn);
+
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < 1500) {
+          await sleep(90);
+          const vStat = await callVoiceBridge({ type: "status" });
+          if (
+            vStat &&
+            vStat.ok &&
+            ((vStat.lastAudioPlayback && vStat.lastAudioPlayback.ts >= sinceTs) ||
+              (vStat.lastVideoPlayback && vStat.lastVideoPlayback.ts >= sinceTs))
+          ) {
+            break;
+          }
+        }
+
+        const prep = await callVoiceBridge({ type: "prepareRef", since: sinceTs }, 5000);
+        if (prep && prep.ok) {
+          preparedClip = prep;
+          log.push(`Prepared native reference audio (${prep.durationMs}ms)`);
+        } else if (prep && prep.needFetch) {
+          log.push(`Fetching reference audio via extension background: ${prep.needFetch}`);
+          const fetched = await new Promise((resolve) => {
+            chrome.runtime.sendMessage(
+              { type: "FETCH_AUDIO_B64", url: prep.needFetch },
+              (r) => resolve(r || { ok: false })
+            );
+          });
+          if (fetched && fetched.ok && fetched.b64) {
+            const dec = await callVoiceBridge(
+              { type: "prepareAudio", b64: fetched.b64, source: "reference-url" },
+              5000
+            );
+            if (dec && dec.ok) {
+              preparedClip = dec;
+              log.push(`Prepared fetched reference audio (${dec.durationMs}ms)`);
+            }
+          }
+        }
+
+        // Pause preview audio or wait until Play Audio finishes so mic-1 is unlocked
+        for (const doc of docs) {
+          doc.querySelectorAll("audio").forEach((a) => {
+            try {
+              a.pause();
+            } catch (_) {}
+          });
+        }
+        await sleep(220);
+      }
+
+      // Strategy 2: Synthesize clean English speech via Go Daemon (/api/tts)
+      if (!preparedClip) {
+        log.push(`Synthesizing English TTS for: "${targetPhrase}"`);
+        const ttsResp = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            { type: "SYNTH_TTS_B64", text: targetPhrase, lang: "en" },
+            (r) => resolve(r || { ok: false, error: "No response from background TTS" })
+          );
+        });
+        if (!ttsResp || !ttsResp.ok || !ttsResp.b64) {
+          return {
+            success: false,
+            error: `Failed to prepare speech audio: ${(ttsResp && ttsResp.error) || "TTS unavailable"}`,
+            log
+          };
+        }
+        const dec = await callVoiceBridge(
+          { type: "prepareAudio", b64: ttsResp.b64, source: "tts" },
+          5000
+        );
+        if (!dec || !dec.ok) {
+          return {
+            success: false,
+            error: `Failed to decode TTS audio: ${(dec && dec.error) || "decode error"}`,
+            log
+          };
+        }
+        preparedClip = dec;
+        log.push(`Prepared English TTS audio (${dec.durationMs}ms)`);
+      }
+
+      // Wait up to 3.5s for mic button to be enabled (not disabled while reference audio finishes)
+      let micEl = null;
+      const micWaitStart = Date.now();
+      while (Date.now() - micWaitStart < 3500) {
+        const curSt = inspectState();
+        const micMeta = curSt.elements.find((e) => e.type === "mic_btn" && !e.disabled);
+        if (micMeta) {
+          micEl = resolveElement(micMeta.id);
+          if (micEl) break;
+        }
+        await sleep(120);
+      }
+
+      if (!micEl) {
+        return {
+          success: false,
+          error: "Microphone button (mic-1) not found or disabled",
+          log
+        };
+      }
+
+      const clipDurMs = Math.max(1200, Number(preparedClip.durationMs) || 2200);
+      const leadMs = 220;
+      const tailMs = 1300;
+
+      // Arm one-shot microphone stream injection
+      const armRes = await callVoiceBridge({
+        type: "arm",
+        leadMs,
+        tailMs,
+        timeoutMs: clipDurMs + 10000
+      });
+      if (!armRes || !armRes.ok) {
+        return {
+          success: false,
+          error: `Failed to arm voice injector: ${(armRes && armRes.error) || "unknown"}`,
+          log
+        };
+      }
+
+      // Click microphone button once to start recording
+      await simulateClick(micEl);
+      log.push(`Started speaking (${preparedClip.source}, ${clipDurMs}ms)...`);
+
+      // Wait while phrase plays into Efekta's audio stream
+      const minPlayMs = clipDurMs + leadMs;
+      const recordWaitMs = Math.min(minPlayMs + 1200, 15000);
+      const recStart = Date.now();
+      let stoppedAutomatically = false;
+      while (Date.now() - recStart < recordWaitMs) {
+        await sleep(150);
+        const vStat = await callVoiceBridge({ type: "status" });
+        if (vStat && vStat.session && vStat.session.stoppedByPage) {
+          stoppedAutomatically = true;
+          break;
+        }
+        if (vStat && vStat.session && vStat.session.playEndedAt) {
+          await sleep(350);
+          break;
+        }
+      }
+
+      // Ensure recording is stopped so Efekta submits audio to ASR
+      await sleep(300);
+      let isRecording = false;
+      let recBtn = null;
+      for (const doc of getAllDocs()) {
+        const ctrl = doc.querySelector(
+          ".speech-action-control.recording, button.audio-recorder-btn [aria-label*='Recording' i], ef-svg-stop"
+        );
+        if (ctrl) {
+          isRecording = true;
+          recBtn = ctrl.closest("button.audio-recorder-btn, [data-qa='audio-record-or-play']") || ctrl;
+          break;
+        }
+      }
+      if (isRecording && recBtn) {
+        await simulateClick(recBtn);
+        log.push("Clicked mic button once to stop recording");
+      }
+
+      // Wait up to 6.5s for Efekta ASR grading to complete
+      const gradeStart = Date.now();
+      while (Date.now() - gradeStart < 6500) {
+        await sleep(200);
+        let isWaiting = false;
+        let isCorrect = false;
+        for (const doc of docs) {
+          if (doc.querySelector(".speech-action-control.waiting_for_assessment")) {
+            isWaiting = true;
+          }
+          if (
+            doc.querySelector(
+              ".speech-action-control.correct, .speech-action-control.playbackEnabled.correct"
+            )
+          ) {
+            isCorrect = true;
+          }
+        }
+        const afterSt = inspectState();
+        if (!isWaiting) {
+          if (isCorrect || afterSt.canProceed) {
+            log.push(`Speech accepted! Next button unlocked (${afterSt.nextButtonId || "passed"}).`);
+            return {
+              success: true,
+              message: `Spoke "${targetPhrase}" (${preparedClip.source}) and passed!`,
+              spokenText: targetPhrase,
+              source: preparedClip.source,
+              canProceed: true,
+              log
+            };
+          }
+          break;
+        }
+      }
+
+      const endSt = inspectState();
+      return {
+        success: true,
+        message: `Spoke "${targetPhrase}" (${preparedClip.source})`,
+        spokenText: targetPhrase,
+        source: preparedClip.source,
+        canProceed: endSt.canProceed,
+        log
+      };
+    } finally {
+      // ALWAYS disarm so the user's real physical microphone works normally afterward!
+      await callVoiceBridge({ type: "disarm", closeSession: false });
+    }
+  }
+
+  // Execute "speak" or "speak all" across a single phrase or an entire 5-phrase speaking drill
+  async function executeSpeak(spec = "") {
+    const raw = String(spec || "").trim().toLowerCase();
+    const runAll = raw === "all" || raw === "";
+    const docs = getAllDocs();
+    const info = extractSpeakingInfo(docs);
+
+    // If not a multi-phrase speaking drill or custom text was specified, speak once
+    if (!runAll || (!info.isSpeakingPractice && raw !== "all")) {
+      return await speakSinglePhrase(spec);
+    }
+
+    const spokenPhrases = [];
+    const logs = [];
+    for (let itemIdx = 0; itemIdx < 8; itemIdx++) {
+      const curDocs = getAllDocs();
+      const curInfo = extractSpeakingInfo(curDocs);
+      const curSt = inspectState();
+      const hasMic = curSt.elements.some((e) => e.type === "mic_btn");
+      if (!hasMic) break;
+
+      const res = await speakSinglePhrase("");
+      if (res.log) logs.push(...res.log);
+      if (!res.success) {
+        return {
+          success: spokenPhrases.length > 0,
+          error: res.error,
+          spokenPhrases,
+          log: logs
+        };
+      }
+      if (res.spokenText) spokenPhrases.push(res.spokenText);
+
+      const postSt = inspectState();
+      if (!postSt.canProceed || !postSt.nextButtonId) {
+        break;
+      }
+
+      // Check if we are on the final item or passed required (e.g. "4 / 5" or "5 / 5") -> leave Next ready for '; next'
+      const optList = (postSt.agentHint && postSt.agentHint.options) || [];
+      const ctxList = postSt.contextText || [];
+      const allText = optList.concat(ctxList).join(" ") + " " + (curInfo.progressText || "");
+      const m = allText.match(/(\d+)\s*\/\s*(\d+)/);
+      if (m && (m[1] === m[2] || Number(m[1]) >= 4)) {
+        break;
+      }
+
+      // Otherwise click Next to advance to the next phrase (e.g. 1/5 -> 2/5)
+      const nextEl = resolveElement(postSt.nextButtonId);
+      if (!nextEl) break;
+      await simulateClick(nextEl);
+      await sleep(380);
+      await waitUntilUnlocked(1500);
+    }
+
+    return {
+      success: true,
+      message: `Completed ${spokenPhrases.length} speaking phrase(s): ${spokenPhrases.join(" | ")}`,
+      spokenPhrases,
+      log: logs
+    };
+  }
+
   // Solver 1: Multiple Choice Brute-Forcer
   async function solveMultipleChoice(delayMs = 140) {
+    await dismissOverlaysIfPresent();
     const initialState = inspectState();
     let candidateMeta = initialState.elements.filter((e) => e.type === "choice" && !e.disabled);
     if (candidateMeta.length === 0) {
@@ -1725,8 +2729,21 @@
       if (!targetEl) continue;
       await simulateClick(targetEl);
       clicked.push(`${meta.id} ("${text}")`);
-      await sleep(delayMs);
-      await waitUntilUnlocked(1500);
+
+      // Poll up to 320ms for canProceed to unlock
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < Math.max(delayMs, 260)) {
+        await sleep(45);
+        const checkSt = inspectState();
+        if (checkSt.canProceed && !checkSt.feedback.startsWith("incorrect")) {
+          return {
+            success: true,
+            message: `Unlocked progression with ${meta.id} ("${text}")`,
+            nextButtonId: checkSt.nextButtonId,
+            clicked
+          };
+        }
+      }
 
       const curState = inspectState();
       const checkBtn = curState.elements.find(
@@ -1806,69 +2823,50 @@
     };
   }
 
-  // Solver 3: Speaking Avatar 3-Attempt Bypass
-  async function skipSpeakingDialog() {
-    const log = [];
+  // Solver 3: Smart Speaking Solver
+  // - On pronunciation / speaking practice drills (ef-speaking-practice-task): speaks all phrases with native/TTS audio!
+  // - On AI Avatar dialogues: speaks chosen multiple-choice response option cleanly with TTS audio.
+  async function solveSpeakingTask() {
+    const docs = getAllDocs();
+    const info = extractSpeakingInfo(docs);
 
+    // Case 1: Speaking practice drill (target phrase / Play Audio button) -> real speech!
+    if (info.isSpeakingPractice || info.targetPhrase || info.playAudioBtn) {
+      return await executeSpeak("all");
+    }
+
+    const log = [];
     const media = getMediaStatus();
-    if (media.isPlaying) {
+    if (media.isPlaying && media.hasVideo) {
       log.push("Waiting for avatar video to finish speaking...");
       await waitForCondition("video-end", 20000);
     }
 
-    window.postMessage({ source: "efekta-content", type: "SET_AUDIO_MOCK", enabled: true }, "*");
+    // Check if avatar dialogue has choices A, B, C visible
+    const st = inspectState();
+    const choiceEls = (st.elements || []).filter(
+      (e) =>
+        e.type === "choice" &&
+        !e.disabled &&
+        (e.tag === "ef-multiple-choice-speech-task-response-option" ||
+          (e.className || "").includes("response-option") ||
+          (e.text && /^[A-Z]\s*:/i.test(e.text)))
+    );
 
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const state = inspectState();
-      const choices = state.elements.filter((e) => e.type === "choice" && !e.disabled);
-      if (choices.length >= 2) {
-        log.push(
-          `Manual choices unlocked after ${attempt - 1} attempt(s)! Found ${choices.length} options.`
-        );
-        return {
-          success: true,
-          manualChoicesUnlocked: true,
-          choices: choices.map((c) => ({ id: c.id, text: c.text })),
-          log
-        };
-      }
-
-      const micBtn = state.elements.find((e) => e.type === "mic_btn" && !e.disabled);
-      if (!micBtn) {
-        log.push(`Attempt ${attempt}: Mic button not currently active, waiting 800ms...`);
-        await sleep(800);
-        const retryState = inspectState();
-        const retryMic = retryState.elements.find((e) => e.type === "mic_btn" && !e.disabled);
-        if (!retryMic) {
-          log.push(`Attempt ${attempt}: No mic button found.`);
-          break;
-        }
-        const el = resolveElement(retryMic.id);
-        if (el) await simulateClick(el);
-      } else {
-        const el = resolveElement(micBtn.id);
-        if (el) await simulateClick(el);
-      }
-
-      log.push(`Attempt ${attempt}: Started synthetic recording`);
-      await sleep(1400);
-
-      const midState = inspectState();
-      const stopMic = midState.elements.find((e) => e.type === "mic_btn" && !e.disabled);
-      if (stopMic) {
-        const stopEl = resolveElement(stopMic.id);
-        if (stopEl) await simulateClick(stopEl);
-      }
-
-      await sleep(1000);
+    let target = "";
+    if (choiceEls.length > 0) {
+      target = choiceEls[0].id || "opt-1";
+      log.push(`Avatar dialogue detected with ${choiceEls.length} choices. Speaking ${target}...`);
     }
 
-    const finalState = inspectState();
-    const unlockedChoices = finalState.elements.filter((e) => e.type === "choice");
+    const res = await speakSinglePhrase(target);
+    if (res.log) log.push(...res.log);
+    const afterSt = inspectState();
     return {
-      success: true,
-      manualChoicesUnlocked: unlockedChoices.length >= 2,
-      choices: unlockedChoices.map((c) => ({ id: c.id, text: c.text })),
+      success: res.success || afterSt.canProceed,
+      message: res.message || (afterSt.canProceed ? "Passed speaking task" : "Spoke phrase"),
+      canProceed: afterSt.canProceed,
+      spokenText: res.spokenText,
       log
     };
   }
@@ -1879,7 +2877,9 @@
     switch (action) {
       case "status":
       case "state": {
-        return { success: true, data: inspectState() };
+        let st = inspectState();
+        st = await autoPeekSelectionGapOptions(st);
+        return { success: true, data: st };
       }
       case "click":
       case "pick": {
@@ -1896,9 +2896,43 @@
       case "fill": {
         return await executeGaps(cmd.target || cmd.text);
       }
+      case "seek": {
+        const docs = getAllDocs();
+        let count = 0;
+        for (const doc of docs) {
+          doc.querySelectorAll("video, audio").forEach((m) => {
+            try {
+              if (isFinite(m.duration) && m.duration > 0 && !m.ended) {
+                m.currentTime = Math.max(0, m.duration - 0.25);
+                m.play().catch(() => {});
+                count++;
+              }
+            } catch (_) {}
+          });
+        }
+        await sleep(400);
+        return { success: true, message: `Fast-forwarded ${count} media element(s)` };
+      }
+      case "speak":
+      case "say": {
+        return await executeSpeak(cmd.target || cmd.text || "");
+      }
+      case "voice": {
+        const sub = (cmd.target || "status").toLowerCase();
+        if (sub === "disarm" || sub === "off" || sub === "reset") {
+          const r = await callVoiceBridge({ type: "disarm", closeSession: true });
+          return { success: true, message: "Microphone disarmed (real mic active)", data: r };
+        }
+        if (sub === "events" || sub === "log") {
+          const r = await callVoiceBridge({ type: "events", limit: 40 });
+          return { success: true, data: r };
+        }
+        const r = await callVoiceBridge({ type: "status" });
+        return { success: true, data: r };
+      }
       case "next":
       case "ff": {
-        return await executeAutoNext(cmd.amount || 7);
+        return await executeAutoNext(cmd.amount || 9);
       }
       case "drag": {
         await waitUntilUnlocked(1500);
@@ -1914,9 +2948,10 @@
         return { success: true, message: `Dragged ${cmd.source} -> ${cmd.target}` };
       }
       case "type": {
+        await dismissOverlaysIfPresent();
         const el = resolveElement(cmd.target);
         if (!el) return { success: false, error: `Input element not found: ${cmd.target}` };
-        await simulateType(el, cmd.text || "", cmd.delayMs || 12);
+        await simulateType(el, cmd.text || "", cmd.delayMs || 6);
         return { success: true, message: `Typed "${cmd.text}" into ${cmd.target}` };
       }
       case "press":
@@ -1945,12 +2980,57 @@
         return { success: res.success, message: res.message, data: res };
       }
       case "skip_speaking": {
-        const res = await skipSpeakingDialog();
-        return { success: res.success, message: "Speaking bypass executed", data: res };
+        const res = await solveSpeakingTask();
+        return {
+          success: res.success,
+          message: res.message || "Speaking solver executed",
+          data: res
+        };
       }
       case "eval": {
-        const selector = cmd.target || "body";
+        const rawTarget = cmd.target || "body";
         const docs = getAllDocs();
+
+        if (rawTarget.startsWith("info:")) {
+          const sel = rawTarget.slice(5).trim();
+          const infos = [];
+          for (const doc of docs) {
+            const elements = Array.from(doc.querySelectorAll(sel));
+            for (const el of elements.slice(0, 10)) {
+              const rect = el.getBoundingClientRect();
+              const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
+              const cs = win.getComputedStyle(el);
+              infos.push({
+                tag: el.tagName.toLowerCase(),
+                id: el.getAttribute("data-efekta-id") || el.id || "",
+                className: el.className || "",
+                text: cleanText(el),
+                visible: isVisible(el),
+                display: cs.display,
+                cursor: cs.cursor,
+                pointerEvents: cs.pointerEvents,
+                rect: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
+                html: el.outerHTML.slice(0, 400),
+                childrenCount: el.children.length
+              });
+            }
+          }
+          return { success: true, data: infos };
+        }
+
+        if (rawTarget.startsWith("click:")) {
+          const sel = rawTarget.slice(6).trim();
+          for (const doc of docs) {
+            const el = doc.querySelector(sel);
+            if (el) {
+              const res = await simulateClick(el);
+              return { success: true, message: `Clicked ${sel}`, clicked: true, tag: el.tagName };
+            }
+          }
+          return { success: false, error: `Element not found for click: ${sel}` };
+        }
+
+        const selector = rawTarget;
         const nodes = [];
         for (const doc of docs) {
           try {
@@ -1986,20 +3066,36 @@
     (async () => {
       try {
         if (request.action === "batch") {
+          // Take upfront pre-batch snapshot so consecutive sort/pick/pair commands never suffer from DOM ID shifts!
+          inspectState();
+          batchElementSnapshot.clear();
+          batchTextSnapshot.clear();
+          for (const [k, v] of elementRegistry.entries()) batchElementSnapshot.set(k, v);
+          for (const [k, v] of idToTextMap.entries()) batchTextSnapshot.set(k, v);
+          inBatchExecution = true;
+
           const results = [];
           const autoReadNotes = [];
           const commands = request.commands || [];
-          for (const sub of commands) {
-            const r = await executeSingleCommand(sub);
-            if (r.autoReadNotes && r.autoReadNotes.length > 0) {
-              for (const n of r.autoReadNotes) {
-                if (!autoReadNotes.includes(n)) autoReadNotes.push(n);
+          try {
+            for (const sub of commands) {
+              const r = await executeSingleCommand(sub);
+              if (r.autoReadNotes && r.autoReadNotes.length > 0) {
+                for (const n of r.autoReadNotes) {
+                  if (!autoReadNotes.includes(n)) autoReadNotes.push(n);
+                }
               }
+              results.push({ action: sub.action, target: sub.target, ...r });
+              if (!r.success && sub.stopOnError) break;
             }
-            results.push({ action: sub.action, target: sub.target, ...r });
-            if (!r.success && sub.stopOnError) break;
+          } finally {
+            inBatchExecution = false;
+            batchElementSnapshot.clear();
+            batchTextSnapshot.clear();
           }
-          const finalState = inspectState();
+
+          let finalState = inspectState();
+          finalState = await autoPeekSelectionGapOptions(finalState);
           if (autoReadNotes.length > 0) {
             finalState.autoReadNotes = autoReadNotes;
           }
@@ -2013,16 +3109,17 @@
         }
 
         const result = await executeSingleCommand(request);
-        // Always include updated state in data for mutating commands so AI agents never need a separate status call!
         const act = (request.action || "").toLowerCase();
         if (
           act !== "status" &&
           act !== "state" &&
           act !== "eval" &&
+          act !== "voice" &&
           act !== "screenshot" &&
           !result.data
         ) {
-          const st = inspectState();
+          let st = inspectState();
+          st = await autoPeekSelectionGapOptions(st);
           if (result.autoReadNotes && result.autoReadNotes.length > 0) {
             st.autoReadNotes = result.autoReadNotes;
           }
@@ -2030,6 +3127,7 @@
         }
         sendResponse(result);
       } catch (err) {
+        inBatchExecution = false;
         sendResponse({
           success: false,
           error: err && err.message ? err.message : String(err)

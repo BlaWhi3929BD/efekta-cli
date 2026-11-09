@@ -172,3 +172,10 @@ func TestConcurrentWebSocketCommandsAndMultiBrowserRouting(t *testing.T) {
 		t.Fatalf("concurrent request failed: %v", err)
 	}
 }
+
+func TestSplitTextChunks(t *testing.T) {
+	chunks := splitTextChunks("I've thought about it. It's time for a change.", 25)
+	if len(chunks) != 2 {
+		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
+	}
+}

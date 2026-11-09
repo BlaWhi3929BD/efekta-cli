@@ -37,8 +37,9 @@ Look at `data.agentHint.exerciseType` from your last response and immediately ru
 | `selection_gaps` | `contextText` has `[slot-1]` + bottom word drawer | `efekta batch "gaps word1, word2, word3, word4, word5; next" --json -c` |
 | `fill_in_the_blanks` | `contextText` has `[input-1]` text blanks | `efekta batch "gaps answer1, answer2, answer3; next" --json -c` |
 | `order_sentence` | `items` are shuffled sentence words | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
+| `speaking_practice` | Pronunciation drill with target phrase | `efekta batch "speak all; next" --json -c` |
 | `speaking_avatar` (optional) | `skip-1` exists in `elements` | `efekta batch "click skip-1; next" --json -c` |
-| `speaking_avatar` (mandatory final) | No `skip-1`; AI video human speaks | `efekta batch "wait video-end; solve speak" --json -c` -> then `efekta batch "pick opt-1; next" --json -c` |
+| `speaking_avatar` (mandatory final) | No `skip-1`; AI avatar shows options A/B/C | `efekta batch "pick opt-2; next" --json -c` *(or `efekta batch "speak opt-2; next" --json -c`)* |
 
 ---
 
@@ -77,3 +78,14 @@ efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
 ```
 - Works for both **Selection-Gap Drawers** (`button.selection-gap-button` + `div.drawer-option`) and **Text Inputs** (`input-1`, `input-2`).
 - For Selection-Gap Drawers, `gaps` automatically clicks the next unfilled gap button, waits for the bottom `.drawer-option` drawer to open, clicks the matching word option, waits for the drawer to close, and repeats for every word in order!
+
+### `speak` / `speak all` — Voice Engine v3 (Real Speech Input)
+```bash
+efekta batch "speak all; next" --json -c
+```
+- **Real physical mic is untouched**: user can speak into their microphone anytime without interference.
+- When `speak` runs, it arms a 1-shot injection window, intercepts native speaker reference audio or synthesizes clean English TTS via daemon `/api/tts`, feeds it cleanly into WebAudio destination stream, and disarms immediately after.
+- In multi-phrase pronunciation drills, `speak all` speaks all 5 phrases in sequence with native pronunciation and auto-advances!
+- In AI Avatar dialogues, Efekta presents response options A, B, C in `agentHint.options`. Pick or speak the chosen option directly:
+  - If tap buttons are visible: `efekta batch "pick opt-2; next" --json -c`
+  - If speech is active: `efekta batch "speak opt-2; next" --json -c` (or `speak B`). Do NOT invent answers; choose from the provided options!

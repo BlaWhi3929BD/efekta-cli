@@ -1,13 +1,39 @@
-// Efekta Bridge - Service Worker / Background Script
+// Efekta Bridge - Service Worker / Background Script (v3.0)
 const DAEMON_WS_URL = "ws://127.0.0.1:8765/ws";
+const DAEMON_TTS_URL = "http://127.0.0.1:8765/api/tts";
+
 let ws = null;
 let reconnectTimer = null;
 let heartbeatTimer = null;
-const tabFrames = new Map(); // tabId -> Map(frameId -> { url, isLessonPlayer })
+const tabFrames = new Map(); // tabId -> Map(frameId -> { url, isLessonPlayer, isTop })
 const tabActiveFrames = new Map(); // tabId -> active frameId
 
 function log(...args) {
   console.log("[Efekta-Daemon-Bridge]", ...args);
+}
+
+function isTransportError(errMsg) {
+  if (!errMsg) return false;
+  const s = String(errMsg).toLowerCase();
+  return (
+    s.includes("receiving end does not exist") ||
+    s.includes("could not establish connection") ||
+    s.includes("message port closed") ||
+    s.includes("message manager disconnected") ||
+    s.includes("frame was removed") ||
+    s.includes("no tab with id") ||
+    s.includes("empty response from content script")
+  );
+}
+
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const chunkSize = 0x8000;
+  const chunks = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)));
+  }
+  return btoa(chunks.join(""));
 }
 
 // Find tab where Efekta is open (prefers active tab in current window if multiple exist)
@@ -20,7 +46,7 @@ async function findEfektaTab() {
     }
     const anyEfekta = tabs.filter((t) => t.url && t.url.includes("efekta.com"));
     return anyEfekta.find((t) => t.active) || anyEfekta[0] || null;
-  } catch (e) {
+  } catch (_) {
     return null;
   }
 }
@@ -33,7 +59,7 @@ async function sendStatusUpdate(type = "ping") {
     ws.send(
       JSON.stringify({
         type,
-        client: "efekta-extension-v2",
+        client: "efekta-extension-v3",
         hasEfektaTab: !!tab,
         tabUrl: tab ? tab.url : "",
         userAgent: navigator.userAgent
@@ -42,115 +68,229 @@ async function sendStatusUpdate(type = "ping") {
   } catch (_) {}
 }
 
-// Ensure content scripts are injected even if tab was opened BEFORE extension was loaded
+// Ensure content scripts are injected into all frames even if tab was opened BEFORE extension reload
 async function ensureContentScriptInjected(tabId) {
   if (!chrome.scripting || !chrome.scripting.executeScript) return;
   try {
     await chrome.scripting.executeScript({
-      target: { tabId },
+      target: { tabId, allFrames: true },
+      files: ["content.js"]
+    });
+  } catch (e) {
+    log("executeScript content.js error:", e && e.message);
+  }
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
       files: ["injected.js"],
       world: "MAIN"
     });
-  } catch (_) {}
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ["content.js"]
-    });
-  } catch (_) {}
+  } catch (e) {
+    log("executeScript injected.js error:", e && e.message);
+  }
 }
 
 function sendMsg(tabId, req, options = {}) {
   return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, req, options, (resp) => {
-      if (chrome.runtime.lastError) {
-        resolve({ success: false, error: chrome.runtime.lastError.message });
-      } else {
-        resolve(resp || { success: false, error: "Empty response from content script" });
-      }
-    });
+    try {
+      chrome.tabs.sendMessage(tabId, req, options, (resp) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            success: false,
+            transportError: true,
+            error: chrome.runtime.lastError.message
+          });
+        } else if (!resp) {
+          resolve({
+            success: false,
+            transportError: true,
+            error: "Empty response from content script"
+          });
+        } else {
+          resolve(resp);
+        }
+      });
+    } catch (e) {
+      resolve({
+        success: false,
+        transportError: true,
+        error: e && e.message ? e.message : String(e)
+      });
+    }
   });
 }
 
-// Send command to content script with automatic iframe and frame-routing support
-async function sendMessageToTabWithRetry(tabId, req) {
-  const candidateFrames = [];
+// Discover ordered candidate frameIds for a tab, pruning any stale/removed frames
+async function getCandidateFrames(tabId) {
+  const candidates = [];
+  const pushUnique = (fId) => {
+    if (typeof fId === "number" && !candidates.includes(fId)) {
+      candidates.push(fId);
+    }
+  };
 
-  // 1. Last known active frame for this tab
-  if (tabActiveFrames.has(tabId)) {
-    candidateFrames.push(tabActiveFrames.get(tabId));
-  }
-
-  // 2. Discover frames via webNavigation API if available
+  let liveFrameIds = null;
   if (chrome.webNavigation && chrome.webNavigation.getAllFrames) {
     try {
       const allFrames = await new Promise((resolve) => {
         chrome.webNavigation.getAllFrames({ tabId }, resolve);
       });
-      if (allFrames && allFrames.length > 0) {
-        const lessonFrames = allFrames.filter(
-          (f) =>
-            f.frameId !== 0 &&
-            f.url &&
-            (f.url.includes("lesson-player") || f.url.includes("study") || f.url.includes("gap"))
-        );
-        for (const lf of lessonFrames) {
-          if (!candidateFrames.includes(lf.frameId)) candidateFrames.push(lf.frameId);
+      if (Array.isArray(allFrames) && allFrames.length > 0) {
+        liveFrameIds = new Set(allFrames.map((f) => f.frameId));
+        // Clean up any stale frames in tabFrames / tabActiveFrames
+        if (tabActiveFrames.has(tabId) && !liveFrameIds.has(tabActiveFrames.get(tabId))) {
+          tabActiveFrames.delete(tabId);
         }
-        for (const f of allFrames) {
-          if (f.frameId !== 0 && !candidateFrames.includes(f.frameId)) {
-            candidateFrames.push(f.frameId);
+        const map = tabFrames.get(tabId);
+        if (map) {
+          for (const k of Array.from(map.keys())) {
+            if (!liveFrameIds.has(k)) map.delete(k);
           }
         }
+
+        // Priority 1: Active lesson-player iframe if present
+        for (const f of allFrames) {
+          if (f.frameId !== 0 && f.url && f.url.includes("lesson-player")) {
+            pushUnique(f.frameId);
+          }
+        }
+        // Priority 1b: Registered lesson player frames from FRAME_REGISTER
+        if (map) {
+          for (const [k, info] of map.entries()) {
+            if (k !== 0 && info.isLessonPlayer && (!liveFrameIds || liveFrameIds.has(k))) {
+              pushUnique(k);
+            }
+          }
+        }
+        // Priority 2: Last known active frame (if non-zero)
+        if (tabActiveFrames.has(tabId) && tabActiveFrames.get(tabId) !== 0) {
+          pushUnique(tabActiveFrames.get(tabId));
+        }
+        // Priority 3: Other study/gap iframes
+        for (const f of allFrames) {
+          if (
+            f.frameId !== 0 &&
+            f.url &&
+            (f.url.includes("study") || f.url.includes("gap"))
+          ) {
+            pushUnique(f.frameId);
+          }
+        }
+        // Priority 4: Top-level frame (frameId 0)
+        pushUnique(0);
+        // Priority 5: Any remaining non-blank child frames
+        for (const f of allFrames) {
+          if (f.frameId !== 0 && f.url && !f.url.startsWith("about:")) {
+            pushUnique(f.frameId);
+          }
+        }
+        return candidates;
       }
     } catch (_) {}
   }
 
-  // 3. Registered frames fallback
+  if (tabActiveFrames.has(tabId)) {
+    pushUnique(tabActiveFrames.get(tabId));
+  }
+
   const framesMap = tabFrames.get(tabId);
   if (framesMap) {
     for (const [fId, info] of framesMap.entries()) {
-      if (fId !== 0 && !candidateFrames.includes(fId)) {
-        if (info.isLessonPlayer || (info.url && (info.url.includes("lesson-player") || info.url.includes("gap")))) {
-          candidateFrames.unshift(fId);
-        } else {
-          candidateFrames.push(fId);
-        }
-      }
+      if (fId !== 0 && info.isLessonPlayer) pushUnique(fId);
+    }
+    for (const [fId] of framesMap.entries()) {
+      if (fId !== 0) pushUnique(fId);
     }
   }
 
-  // 4. Finally top-level frame (frameId: 0)
-  if (!candidateFrames.includes(0)) {
-    candidateFrames.push(0);
-  }
+  pushUnique(0);
+  return candidates;
+}
 
-  // Try each candidate frame
-  let lastError = "No frames available";
-  for (const fId of candidateFrames) {
-    const res = await sendMsg(tabId, req, { frameId: fId });
-    if (res && res.success) {
-      if (req.action === "status") {
-        if (res.data && res.data.elementsCount > 0) {
+// Send command to content script with automatic iframe discovery, active-frame routing, and auto-reinject
+async function sendMessageToTabWithRetry(tabId, req) {
+  for (let pass = 0; pass < 2; pass++) {
+    const candidateFrames = await getCandidateFrames(tabId);
+    let lastAppFailure = null;
+    let lastTransportError = "No frames available";
+    let bestEmptyStatus = null;
+
+    for (const fId of candidateFrames) {
+      const res = await sendMsg(tabId, req, { frameId: fId });
+      if (res && res.success) {
+        // If top frame (frame 0) responded but has 0 elements or 0 spoken phrases while child frames exist, prefer child frames!
+        const isEmptyFrame =
+          fId === 0 &&
+          res.data &&
+          res.data.elementsCount === 0 &&
+          res.data.exerciseType === "unknown";
+        const isSpokenZeroOnEmpty =
+          fId === 0 &&
+          typeof res.message === "string" &&
+          res.message.includes("Completed 0");
+
+        if ((isEmptyFrame || isSpokenZeroOnEmpty) && candidateFrames.some((c) => c !== 0)) {
+          if (!bestEmptyStatus) bestEmptyStatus = res;
+          continue;
+        }
+
+        // If top frame is empty and no child frame was found, try injecting scripts into all frames and retry pass 1!
+        if (pass === 0 && isEmptyFrame && !candidateFrames.some((c) => c !== 0)) {
+          if (!bestEmptyStatus) bestEmptyStatus = res;
+          await ensureContentScriptInjected(tabId);
+          await new Promise((r) => setTimeout(r, 280));
+          break;
+        }
+
+        if (req.action === "status" || req.action === "state") {
+          if (res.data && res.data.elementsCount > 0) {
+            tabActiveFrames.set(tabId, fId);
+            return res;
+          }
+          if (!bestEmptyStatus) bestEmptyStatus = res;
+          continue;
+        } else if (req.action === "eval") {
+          if (Array.isArray(res.data) && res.data.length > 0) {
+            tabActiveFrames.set(tabId, fId);
+            return res;
+          }
+          if (!bestEmptyStatus) bestEmptyStatus = res;
+          continue;
+        } else {
           tabActiveFrames.set(tabId, fId);
           return res;
         }
-      } else {
-        tabActiveFrames.set(tabId, fId);
-        return res;
+      } else if (res) {
+        if (res.transportError || isTransportError(res.error)) {
+          lastTransportError = res.error;
+          const map = tabFrames.get(tabId);
+          if (map) map.delete(fId);
+          if (tabActiveFrames.get(tabId) === fId) tabActiveFrames.delete(tabId);
+        } else {
+          // Real error from a live content script (e.g. element not found in this frame)
+          if (!lastAppFailure) lastAppFailure = res;
+        }
       }
-    } else if (res && res.error) {
-      lastError = res.error;
+    }
+
+    if (bestEmptyStatus) {
+      return bestEmptyStatus;
+    }
+
+    if (lastAppFailure) {
+      return lastAppFailure;
+    }
+
+    // All frames failed with transport error: inject scripts and retry after brief settle delay
+    if (pass === 0) {
+      await ensureContentScriptInjected(tabId);
+      await new Promise((r) => setTimeout(r, 220));
+    } else {
+      return { success: false, error: lastTransportError };
     }
   }
 
-  // Fallback for status: if no frame had elements, try top-level frame status
-  if (req.action === "status") {
-    const res = await sendMsg(tabId, req, { frameId: 0 });
-    if (res && res.success) return res;
-  }
-
-  return { success: false, error: lastError };
+  return { success: false, error: "Failed to communicate with Efekta tab" };
 }
 
 function connectDaemon() {
@@ -167,10 +307,14 @@ function connectDaemon() {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
       }
+      try {
+        const tab = await findEfektaTab();
+        if (tab) await ensureContentScriptInjected(tab.id);
+      } catch (_) {}
       await sendStatusUpdate("hello");
 
       if (heartbeatTimer) clearInterval(heartbeatTimer);
-      // 15s WebSocket heartbeat keeps Manifest V3 Service Worker alive in Chromium 116+
+      // 15s WebSocket heartbeat keeps Manifest V3 Service Worker alive
       heartbeatTimer = setInterval(() => {
         sendStatusUpdate("ping");
       }, 15000);
@@ -180,7 +324,7 @@ function connectDaemon() {
       let req;
       try {
         req = JSON.parse(event.data);
-      } catch (err) {
+      } catch (_) {
         return;
       }
 
@@ -203,6 +347,45 @@ function connectDaemon() {
                 "No Efekta tab found in browser. Please open https://learn.better.efekta.com"
             })
           );
+          return;
+        }
+
+        if (action === "debug_frames") {
+          let navFrames = [];
+          if (chrome.webNavigation && chrome.webNavigation.getAllFrames) {
+            navFrames = await new Promise((r) => chrome.webNavigation.getAllFrames({ tabId: tab.id }, r));
+          }
+          const registered = [];
+          const map = tabFrames.get(tab.id);
+          if (map) {
+            for (const [fId, info] of map.entries()) {
+              registered.push({ fId, ...info });
+            }
+          }
+          const candidateFrames = await getCandidateFrames(tab.id);
+          const probeResults = [];
+          for (const fId of candidateFrames) {
+            const res = await sendMsg(tab.id, { action: "status" }, { frameId: fId });
+            probeResults.push({
+              fId,
+              resSuccess: res ? res.success : false,
+              elementsCount: (res && res.data && res.data.elementsCount) || 0,
+              url: (res && res.data && res.data.url) || "",
+              error: res && res.error
+            });
+          }
+          ws.send(JSON.stringify({
+            id: reqId,
+            success: true,
+            data: {
+              tabId: tab.id,
+              activeFrame: tabActiveFrames.get(tab.id),
+              candidateFrames,
+              probeResults,
+              navFrames,
+              registered
+            }
+          }));
           return;
         }
 
@@ -283,7 +466,7 @@ function connectDaemon() {
         ws.close();
       } catch (_) {}
     };
-  } catch (err) {
+  } catch (_) {
     scheduleReconnect();
   }
 }
@@ -297,7 +480,6 @@ function scheduleReconnect() {
   }
 }
 
-// Keep MV3 service worker awake via chrome.alarms as backup
 if (chrome.alarms) {
   chrome.alarms.create("efekta-keepalive", { periodInMinutes: 0.4 });
   chrome.alarms.onAlarm.addListener((alarm) => {
@@ -311,7 +493,6 @@ if (chrome.alarms) {
   });
 }
 
-// Notify daemon immediately when user opens or navigates an Efekta tab
 if (chrome.tabs && chrome.tabs.onUpdated) {
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     if (changeInfo.status === "complete" && tab.url && tab.url.includes("efekta.com")) {
@@ -334,8 +515,85 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       isLessonPlayer: !!msg.isLessonPlayer,
       isTop: !!msg.isTop
     });
-    log(`Registered frame (tab ${sender.tab.id}, frame ${frameId}): ${msg.url} (lesson=${msg.isLessonPlayer})`);
+    if (msg.isLessonPlayer && frameId !== 0) {
+      tabActiveFrames.set(sender.tab.id, frameId);
+    }
     return;
+  }
+
+  // Fetch cross-origin reference audio bytes for Voice Engine
+  if (msg && msg.type === "FETCH_AUDIO_B64" && msg.url) {
+    (async () => {
+      try {
+        const resp = await fetch(msg.url);
+        if (!resp.ok) {
+          sendResponse({ ok: false, error: `HTTP ${resp.status}` });
+          return;
+        }
+        const buf = await resp.arrayBuffer();
+        const b64 = arrayBufferToBase64(buf);
+        sendResponse({
+          ok: true,
+          b64,
+          mime: resp.headers.get("content-type") || "audio/mpeg"
+        });
+      } catch (e) {
+        // Fallback through local Go daemon proxy
+        try {
+          const dResp = await fetch(DAEMON_TTS_URL, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Efekta-Client": "efekta-cli"
+            },
+            body: JSON.stringify({ url: msg.url })
+          });
+          const data = await dResp.json();
+          if (data && data.success && data.audioBase64) {
+            sendResponse({ ok: true, b64: data.audioBase64, mime: data.mime || "audio/mpeg" });
+            return;
+          }
+        } catch (_) {}
+        sendResponse({ ok: false, error: (e && e.message) || String(e) });
+      }
+    })();
+    return true;
+  }
+
+  // Synthesize English speech via Go daemon /api/tts for Voice Engine
+  if (msg && msg.type === "SYNTH_TTS_B64" && msg.text) {
+    (async () => {
+      try {
+        const resp = await fetch(DAEMON_TTS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Efekta-Client": "efekta-cli"
+          },
+          body: JSON.stringify({
+            text: msg.text,
+            lang: msg.lang || "en"
+          })
+        });
+        const data = await resp.json();
+        if (data && data.success && data.audioBase64) {
+          sendResponse({
+            ok: true,
+            b64: data.audioBase64,
+            mime: data.mime || "audio/mpeg",
+            source: data.source || "tts"
+          });
+        } else {
+          sendResponse({
+            ok: false,
+            error: (data && data.error) || "TTS synthesis failed"
+          });
+        }
+      } catch (e) {
+        sendResponse({ ok: false, error: (e && e.message) || String(e) });
+      }
+    })();
+    return true;
   }
 
   if (msg && msg.type === "POPUP_GET_STATUS") {
@@ -348,6 +606,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+
   if (msg && msg.type === "POPUP_RECONNECT") {
     if (ws) {
       try {

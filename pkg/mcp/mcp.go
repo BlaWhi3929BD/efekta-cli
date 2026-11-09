@@ -86,7 +86,7 @@ func handleRPC(req rpcRequest, execFn CommandExecutor) rpcResponse {
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    "efekta-cli-mcp",
-					"version": "2.1.0",
+					"version": "2.2.0",
 				},
 			},
 		}
@@ -144,10 +144,15 @@ func getToolDefinitions() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
 			"name":        "efekta_status",
-			"description": "Inspect the current learn.better.efekta.com lesson page. Returns exerciseType (multiple_choice, fill_in_the_blanks, order_sentence, categorize_columns, speaking_avatar), prompt, contextText with inline [input-N]/[slot-N] markers, feedback, video status, canProceed flag, and all interactive elements with virtual IDs (opt-1, item-1, slot-1, input-1, next-1, mic-1, stage-1).",
+			"description": "Inspect the current learn.better.efekta.com lesson page. Returns exerciseType (multiple_choice, fill_in_the_blanks, order_sentence, categorize_columns, speaking_avatar), prompt, contextText with inline [input-N]/[slot-N] markers, feedback, video status, canProceed flag, and agentHint with pre-built actions.",
 			"inputSchema": map[string]interface{}{
-				"type":       "object",
-				"properties": map[string]interface{}{},
+				"type": "object",
+				"properties": map[string]interface{}{
+					"compact": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Strip verbose coordinate dump (elements) to save 80% tokens, leaving agentHint, prompt, and state (default: true)",
+					},
+				},
 			},
 		},
 		{
@@ -257,14 +262,31 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 		{
+			"name":        "efekta_speak",
+			"description": "Speak English phrase(s) into the Efekta microphone using native reference audio loopback ('Play audio') or synthesized English TTS via Voice Engine v3 (one-shot armed so the user's real microphone stays untouched). Pass 'all' to complete an entire multi-phrase speaking drill.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"text": map[string]interface{}{
+						"type":        "string",
+						"description": "'all' (default) to speak target phrase(s) automatically, or custom English text to speak",
+					},
+				},
+			},
+		},
+		{
 			"name":        "efekta_batch",
-			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
+			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'speak all', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"commands": map[string]interface{}{
 						"type":        "string",
 						"description": "Semicolon-separated command chain (always end with '; next' to auto-advance!)",
+					},
+					"compact": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Strip verbose coordinate dump (elements) to save 80% tokens, leaving agentHint, prompt, and state (default: true)",
 					},
 				},
 				"required": []string{"commands"},
@@ -333,6 +355,12 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		cmd = protocol.Command{Action: "wait", Target: strArg("condition")}
 	case "efekta_eval":
 		cmd = protocol.Command{Action: "eval", Target: strArg("selector")}
+	case "efekta_speak":
+		txt := strArg("text")
+		if txt == "" {
+			txt = "all"
+		}
+		cmd = protocol.Command{Action: "speak", Target: txt}
 	case "efekta_batch":
 		subCmds := protocol.ParseBatchString(strArg("commands"))
 		cmd = protocol.Command{Action: "batch", Commands: subCmds}
@@ -382,6 +410,17 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 	resp, err := execFn(cmd)
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err), true
+	}
+	compact := true
+	if v, ok := params.Arguments["compact"]; ok {
+		if b, ok := v.(bool); ok {
+			compact = b
+		}
+	}
+	if compact && resp != nil && resp.Data != nil {
+		if m, ok := resp.Data.(map[string]interface{}); ok {
+			delete(m, "elements")
+		}
 	}
 	b, _ := json.MarshalIndent(resp, "", "  ")
 	return string(b), !resp.Success

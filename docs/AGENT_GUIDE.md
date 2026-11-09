@@ -75,17 +75,29 @@ Click all tokens in order + advance in **1 command**:
 efekta batch "pick item-4,item-1,item-5,item-2,item-3; next" --json -c
 ```
 
-### Case 7: `speaking_avatar` (Microphone / AI Video Human)
+### Case 7: `speaking_practice` (Pronunciation Drill with Microphone)
+- Target phrase is displayed in `agentHint.summary` and `contextText`.
+- Complete all phrases in the drill + advance in **1 command**:
+  ```bash
+  efekta batch "speak all; next" --json -c
+  ```
+  *(Voice Engine v3 captures native reference audio or synthesizes clean English TTS via daemon `/api/tts`, feeds it cleanly into the one-shot armed microphone stream, and leaves the user's real microphone 100% untouched for when they speak).*
+
+### Case 8: `speaking_avatar` (Microphone / AI Video Human)
 - **Non-final stage (`skip-1` is present):**
   ```bash
   efekta batch "click skip-1; next" --json -c
   ```
 - **Final stage (Mandatory AI Avatar Dialogue, no `skip-1`):**
-  1. Unlock manual choices via 3-attempt synthetic audio bypass:
-     ```bash
-     efekta batch "wait video-end; solve speak" --json -c
-     ```
-  2. Pick the right manual choice + advance:
-     ```bash
-     efekta batch "pick opt-1; next" --json -c
-     ```
+  Efekta presents response options (A, B, C) in `agentHint.options`.
+  - **Tap mode (buttons visible):** Pick the chosen option directly + advance in 1 command:
+    ```bash
+    efekta batch "pick opt-2; next" --json -c
+    ```
+  - **Speech mode (microphone visible):** Speak the chosen option directly + advance in 1 command:
+    ```bash
+    efekta batch "speak opt-2; next" --json -c
+    # or by letter:
+    efekta batch "speak B; next" --json -c
+    ```
+  *(Never invent arbitrary responses: always choose from the options listed in `agentHint.options`).*
