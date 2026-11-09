@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Efekta AI Bridge</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 16px;
+      width: 280px;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+    h3 {
+      margin: 0 0 12px 0;
+      font-size: 15px;
+      color: #38bdf8;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .badge {
+      display: inline-block;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: #94a3b8;
+    }
+    .badge.ok {
+      background: #22c55e;
+      box-shadow: 0 0 8px #22c55e;
+    }
+    .badge.err {
+      background: #ef4444;
+      box-shadow: 0 0 8px #ef4444;
+    }
+    .status-box {
+      background: #1e293b;
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.6;
+      margin-bottom: 12px;
+    }
+    .code {
+      font-family: monospace;
+      background: #334155;
+      padding: 2px 5px;
+      border-radius: 4px;
+      color: #7dd3fc;
+    }
+    button {
+      width: 100%;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 12px;
+      cursor: pointer;
+      margin-bottom: 10px;
+    }
+    button:hover {
+      background: #334155;
+    }
+  </style>
+</head>
+<body>
+  <h3><span class="badge" id="indicator"></span> Efekta AI Bridge v2.0</h3>
+  <div class="status-box">
+    Daemon WS: <b id="daemon-status">Checking...</b><br>
+    Efekta Tab: <b id="tab-status">Checking...</b><br>
+    Port: <span class="code">127.0.0.1:8765</span><br>
+    WebRTC Bypass: <span style="color: #38bdf8;">Active</span>
+  </div>
+  <button id="reconnect-btn">Reconnect to Daemon</button>
+  <div style="font-size: 11px; color: #94a3b8;">
+    CLI / MCP Ready:
+    <div style="margin-top: 4px;" class="code">efekta status --json</div>
+  </div>
+  <script src="popup.js"></script>
+</body>
+</html>

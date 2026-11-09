@@ -1,0 +1,10 @@
+bin/
+dist/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+*.png
+.DS_Store

@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Efekta AI Bridge",
+  "version": "2.0.0",
+  "description": "High-speed cross-browser automation bridge connecting learn.better.efekta.com to efekta-cli & MCP for AI agents.",
+  "permissions": [
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "*://learn.better.efekta.com/*",
+    "*://*.efekta.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
+      "js": ["injected.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["injected.js"],
+      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"]
+    }
+  ],
+  "action": {
+    "default_title": "Efekta AI Bridge",
+    "default_popup": "popup.html"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "efekta-bridge@efekta-cli.local",
+      "strict_min_version": "128.0"
+    }
+  }
+}
