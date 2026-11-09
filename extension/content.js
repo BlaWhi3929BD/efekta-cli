@@ -401,16 +401,25 @@
 
     if (elementRegistry.has(target)) {
       const el = elementRegistry.get(target);
-      if (el && el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)) return el;
+      if (el && (el.isConnected || (el.ownerDocument && el.ownerDocument.body && el.ownerDocument.body.contains(el)))) {
+        return el;
+      }
     }
 
     const docs = getAllDocs();
 
-    // Lookup via persistent data attribute
+    // Lookup via persistent data attribute (including shadow roots)
     for (const doc of docs) {
       try {
         const byAttr = doc.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
         if (byAttr) return byAttr;
+        const allHosts = doc.querySelectorAll("*");
+        for (const host of allHosts) {
+          if (host.shadowRoot) {
+            const inner = host.shadowRoot.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
+            if (inner) return inner;
+          }
+        }
       } catch (_) {}
     }
 
