@@ -438,6 +438,12 @@
   // Build rich semantic page state for AI agents
   function inspectState() {
     elementRegistry.clear();
+    try {
+      document
+        .querySelectorAll("[data-efekta-id]")
+        .forEach((n) => n.removeAttribute("data-efekta-id"));
+    } catch (_) {}
+
     const counters = {
       opt: 1,
       item: 1,
@@ -482,7 +488,20 @@
       "[class*='step']"
     ].join(",");
 
-    const rawList = Array.from(document.querySelectorAll(interactiveSelectors));
+    const rawSet = new Set(document.querySelectorAll(interactiveSelectors));
+    // Also discover CSS-in-JS / Tailwind obfuscated interactive elements via computed cursor: pointer
+    const pointerCandidates = document.querySelectorAll("div, span, li, label");
+    for (const node of pointerCandidates) {
+      if (rawSet.has(node)) continue;
+      const r = node.getBoundingClientRect();
+      if (r.width >= 20 && r.width <= 700 && r.height >= 18 && r.height <= 220) {
+        if (window.getComputedStyle(node).cursor === "pointer") {
+          rawSet.add(node);
+        }
+      }
+    }
+
+    const rawList = Array.from(rawSet);
     const elements = [];
     const registeredNodes = new Set();
 
