@@ -141,6 +141,10 @@ function connectDaemon() {
 
         if (action === "screenshot") {
           try {
+            if (!tab.active && chrome.tabs && chrome.tabs.update) {
+              await chrome.tabs.update(tab.id, { active: true });
+              await new Promise((r) => setTimeout(r, 80));
+            }
             const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
             ws.send(
               JSON.stringify({
