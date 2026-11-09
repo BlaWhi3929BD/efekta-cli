@@ -12,19 +12,18 @@
   ],
   "host_permissions": [
     "*://learn.better.efekta.com/*",
-    "*://*.efekta.com/*"
+    "*://*.efekta.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' ws://127.0.0.1:* http://127.0.0.1:*"
+  },
   "background": {
     "scripts": ["background.js"],
     "service_worker": "background.js"
   },
   "content_scripts": [
-    {
-      "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
-      "js": ["injected.js"],
-      "run_at": "document_start",
-      "world": "MAIN"
-    },
     {
       "matches": ["*://learn.better.efekta.com/*", "*://*.efekta.com/*"],
       "js": ["content.js"],
