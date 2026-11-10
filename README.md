@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Go](https://img.shields.io/badge/Go-1.23+-00ADD8.svg)](https://go.dev/)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-brightgreen.svg)](#installation)
-[![MCP Ready](https://img.shields.io/badge/MCP-Stdio%20Server-purple.svg)](#mcp-integration-claude-cursor-windsurf-cline-antigravity)
+[![MCP Ready](https://img.shields.io/badge/MCP-Stdio%20Server-purple.svg)](#mcp-integration-claude-cursor-windsurf-cline-antigravity-codex)
 
 ---
 
@@ -13,11 +13,12 @@
 
 - **Blazing Fast (< 5ms CLI latency):** Single compiled Go binary with an auto-starting background WebSocket daemon.
 - **Universal Browser Support:** Works in **Chrome, Brave, Edge, Firefox, Zen, Opera, and Vivaldi** via a Manifest V3 WebExtension (`extension/`). Automatically routes commands to whichever browser has an active `learn.better.efekta.com` tab.
-- **Zero Anti-Bot Detection:** Runs inside your genuine browser session with real cookies, native pointer/mouse event sequences, and React 16–19 controlled input compatibility.
-- **WebRTC Synthetic Speech Bypass:** Hooks `navigator.mediaDevices.getUserMedia` to synthesize speech-modulated audio, burning 3 voice attempts in seconds to unlock manual text answers on AI avatar dialogue stages.
+- **Turbo Autonomous Mode (`efekta auto`):** Automatically navigates reading cards, auto-skips pronunciation drills, conducts AI avatar dialogues, and auto-solves multiple choice. Only halts when human knowledge exercises (`gaps`, `sort`, `pair`) need an answer.
+- **Zero Anti-Bot Detection:** Runs inside your genuine browser session with real cookies, native pointer/mouse event sequences, and React/Angular controlled input compatibility.
+- **Voice Engine v3:** One-shot loopback audio synthesis into the browser's microphone input for avatar roleplays and pronunciation drills while keeping physical microphone untouched.
 - **Universal AI Agent Compatibility:**
-  - **CLI Mode:** Structured `--json` output, deterministic virtual IDs (`opt-1`, `item-1`, `slot-1`, `input-1`, `next-1`, `mic-1`, `stage-1`), and single-roundtrip `batch` execution.
-  - **MCP Server Mode (`efekta mcp`):** Built-in JSON-RPC 2.0 stdio server for Claude Desktop, Claude Code, Cursor, Windsurf, Cline, OpenAI Codex, and Google Antigravity.
+  - **CLI Mode:** Structured `--json -c` compact output, deterministic virtual IDs (`opt-1`, `item-1`, `slot-1`, `input-1`, `next-1`, `stage-1`), and single-roundtrip `batch` execution.
+  - **MCP Server Mode (`efekta mcp`):** Native JSON-RPC 2.0 stdio server for Claude Desktop, Claude Code, Cursor, Windsurf, Cline, OpenAI Codex, and Google Antigravity.
   - **Self-Documenting (`efekta guide`):** Prints the complete AI Agent Playbook & Efekta heuristics right from the binary.
 
 ---
@@ -46,7 +47,7 @@ go build -o bin/efekta ./cmd/efekta
 3. Verify connection:
    ```bash
    efekta daemon status
-   efekta status
+   efekta status --json -c
    ```
 
 ---
@@ -54,41 +55,51 @@ go build -o bin/efekta ./cmd/efekta
 ## CLI Usage & Turbo Commands (1-Command-Per-Screen)
 
 ```bash
-# Inspect current exercise with Compact Mode (-c saves 80% tokens & highlights agentHint)
-efekta status --json -c
+# Full Autonomous Progression (auto-conducts reading, drills, dialogues, multiple-choice)
+efekta auto --json -c
 
-# Auto-advance & fast-forward through all consecutive passive/reading/summary screens
+# Auto-advance & fast-forward through consecutive passive/reading/summary screens
 efekta next --json -c
+
+# Autonomous Lesson Selector & Navigator
+efekta lesson next --json -c   # Auto-detect & start next incomplete lesson
+efekta lesson list --json -c   # View all units, lessons, completion status & next lesson
+efekta lesson U3L1 --json -c   # Jump directly to Unit 3 Lesson 1
+efekta lesson TEST --json -c   # Jump directly to Final Progress Test
+
+# 1-Shot Multi-Phrase Pronunciation Drill Skipper
+efekta skip --json -c
+
+# 1-Shot Avatar Dialogue Roleplay (turns A/B/C)
+efekta batch "dialogue; next" --json -c
 
 # 1-Shot Matching Pairs + Auto-Advance
 efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
 
-# 1-Shot Category Sorting (immune to DOM removal) + Auto-Advance
+# 1-Shot Category Sorting (DOM-shift immune) + Auto-Advance
 efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
 
 # 1-Shot Selection-Gap Drawer / Blank Filling + Auto-Advance
 efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
 
-# 1-Shot Multi-Select or Sentence Reordering + Auto-Advance
-efekta batch "pick opt-1,opt-3,opt-5; next" --json -c
+# 1-Shot 120+ Word B2 Essay / Formal Email Writer + Auto-Advance
+efekta batch "essay; next" --json -c
 
-# Built-in smart solvers
-efekta solve choice --json     # Brute-force multiple choice options until Next unlocks
-efekta solve sentence --json   # Analyze sentence order (capital first word + ending punctuation)
-efekta solve speak --json      # Burn 3 synthetic audio attempts to unlock manual choices
+# 1-Shot Tap Sequence Sentence Reordering + Auto-Advance
+efekta batch "sequence auto; next" --json -c
+
+# 1-Shot Multi-Select Multiple Choice + Auto-Advance
+efekta batch "solve choice; next" --json -c
 
 # Capture lossless PNG screenshot of the Efekta tab
 efekta screen -o screenshot.png
-
-# Print the 1-Look AI Agent Decision Matrix & Playbook
-efekta guide
 ```
 
 ---
 
 ## MCP Integration (Claude, Cursor, Windsurf, Cline, Antigravity, Codex)
 
-`efekta` includes a native **Model Context Protocol (MCP)** stdio server. Add it to your agent's MCP configuration (`claude_desktop_config.json`, `.cursor/mcp.json`, etc.):
+`efekta` includes a native **Model Context Protocol (MCP)** stdio server. Add it to your agent's MCP configuration (`mcp_config.json`, `claude_desktop_config.json`, etc.):
 
 ```json
 {
@@ -103,29 +114,25 @@ efekta guide
 
 ### Exposed MCP Tools
 - `efekta_status` — Inspect exercise type, prompt, inline blank context (`[input-1]`), feedback, video state, and interactive elements.
+- `efekta_autopilot` — Full autonomous progression across passive screens, drills, dialogues, and multiple choice.
+- `efekta_next` — Fast-forward through consecutive passive screens and summaries until interactive exercise.
+- `efekta_batch` — Execute chained commands in a single roundtrip (e.g. `"gaps ...; next"`).
+- `efekta_lesson` — Select, list, or start lessons and the final progress test.
+- `efekta_dialogue` — Complete entire multi-turn AI avatar dialogue roleplay end to end.
+- `efekta_essay` — Auto-write and submit 120+ word B2 formal email/essay and pass self-evaluation.
+- `efekta_sequence` — Auto-order tokens in tap-sequencing tasks.
+- `efekta_solve` — Run smart solver (`choice`, `sentence`, or `speak`).
 - `efekta_click` — Click element by virtual ID, selector, text, or coordinates.
 - `efekta_drag` — Drag word/card (`item-N`) to target slot/column (`slot-N`).
 - `efekta_type` — Type text into a blank (`input-N`).
-- `efekta_solve` — Run smart solver (`choice`, `sentence`, or `speak`).
 - `efekta_wait` — Wait for `video-end`, `next`, or milliseconds.
+- `efekta_screenshot` — Save lossless PNG screenshot to disk.
 
 ---
 
-## AI Agent Playbook & Efekta Heuristics
+## Progress Test Protocol ("Take the final test")
 
-This repository includes ready-to-use agent instructions in [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md), [`docs/AGENT_GUIDE.md`](docs/AGENT_GUIDE.md), and [`skills/efekta-automation/SKILL.md`](skills/efekta-automation/SKILL.md).
-
-1. **First 3 Stages No-Voice Rule:** Inside any lesson (`Level -> Unit -> Lesson -> Stages`), the first 3 stages can be passed without speaking. Click the end stage indicator (`stage-N`) to inspect minimum requirements and complete only non-voice tasks.
-2. **Multiple Choice (`multiple_choice`):** Run `efekta solve choice --json` to rapidly cycle through options until progression unlocks.
-3. **Fill in the Blanks (`fill_in_the_blanks`):** Always wait **300–400ms** (`wait 350`) between filling consecutive blanks so Efekta's UI state does not reset.
-4. **Order Sentence (`order_sentence`):** Run `efekta solve sentence --json`. First word is always capitalized (watch out for standalone `"I"`), last word always ends with punctuation (`.`, `?`, `!`).
-5. **Categorize Columns (`categorize_columns`):** Wait **400–500ms** (`wait 450`) between dragging cards into columns so Efekta's slow acceptance animation completes.
-6. **Speaking Avatar (`speaking_avatar`):** Run `efekta wait video-end && efekta solve speak --json`. After 3 failed synthetic speech recordings, Efekta unlocks manual multiple-choice selection!
-
----
-
-## Security & Architecture
-
-- **WebSocket Origin Verification:** Daemon only accepts WebSocket connections from browser extensions (`chrome-extension://`, `moz-extension://`, `safari-web-extension://`), blocking arbitrary websites from hijacking the bridge.
-- **CSRF Protection:** `/api/exec` rejects requests containing browser `Origin` / `Sec-Fetch-Site` headers and requires `X-Efekta-Client: efekta-cli`.
-- **Thread-Safe Multi-Browser Pool:** Concurrent requests are serialized per WebSocket session and routed automatically to the browser window with an active Efekta tab.
+On regular lessons, trial-and-error (`solve choice`) is allowed. However, on the **Progress Test**:
+1. **NO TRIAL-AND-ERROR / BRUTE FORCE:** Questions are single-shot exams without retries. Every wrong answer permanently lowers the proficiency certificate score.
+2. **LINGUISTIC DERIVATION:** Every option must be derived through careful grammatical, semantic, and context-specific linguistic analysis.
+3. **SUBMISSION:** Use `efekta batch "pick opt-X; next" --json -c` only after confirming the correct choice.

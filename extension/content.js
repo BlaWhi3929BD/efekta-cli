@@ -2162,6 +2162,11 @@
         }
 
         await simulateClick(matchOpt);
+        await sleep(80);
+        if (matchOpt.classList.contains("deselected")) {
+          await simulateClick(matchOpt);
+          await sleep(80);
+        }
         filled.push(word);
 
         // Wait up to 400ms for drawer selection to commit before moving to next gap
@@ -2190,6 +2195,42 @@
       await simulateType(inputDom, word, 6);
       filled.push(`${targetId}=${word}`);
       await sleep(180);
+    }
+
+    // Post-fill verification: ensure all gap buttons are committed and next-1 unlocks cleanly
+    if (initialGapButtons.length > 0) {
+      await sleep(150);
+      const docsCurrent = getAllDocs();
+      for (const doc of docsCurrent) {
+        const deselected = doc.querySelectorAll(".drawer-option.deselected, div.drawer-option.deselected");
+        for (const dOpt of deselected) {
+          if (isVisible(dOpt)) {
+            await simulateClick(dOpt);
+            await sleep(80);
+          }
+        }
+      }
+
+      let stNow = inspectState();
+      if (!stNow.canProceed) {
+        for (const doc of docsCurrent) {
+          const gaps = Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(isVisible);
+          const unfilled = gaps.find((b) => {
+            const t = cleanText(b).toLowerCase();
+            const cls = (b.className || "").toLowerCase();
+            return !t || t.includes("blank") || /^[_.\s-]+$/.test(t) || cls.includes("empty") || !cls.includes("filled");
+          });
+          if (unfilled) {
+            await simulateClick(unfilled);
+            await sleep(150);
+            const opts = getVisibleDrawerOptions().filter((o) => !o.classList.contains("disabled"));
+            if (opts.length > 0) {
+              await simulateClick(opts[0]);
+              await sleep(150);
+            }
+          }
+        }
+      }
     }
 
     return {
@@ -2480,13 +2521,19 @@
     await dismissOverlaysIfPresent();
     const log = [];
 
+    const docs = getAllDocs();
+    const hasChoicesOrMic = docs.some((d) =>
+      d.querySelector(
+        "ef-multiple-choice-speech-task-response-option, .response-option, .speech-action-control, .mic-button, button[class*='mic']"
+      )
+    );
+
     const media = getMediaStatus();
-    if (media.isPlaying && media.hasVideo) {
+    if (!hasChoicesOrMic && media.isPlaying && media.hasVideo) {
       log.push("Waiting for avatar video to finish speaking...");
-      await waitForCondition("video-end", 20000);
+      await waitForCondition("video-end", 6000);
     }
 
-    const docs = getAllDocs();
     const speakingInfo = extractSpeakingInfo(docs);
     const st = inspectState();
 
@@ -3347,17 +3394,19 @@
       const media = getMediaStatus();
       if (!scenario && st.contextText && st.contextText.length) scenario = st.contextText.join(" ");
 
-      // Instruction screen / leftover Next button with no question on screen
-      if (opts.length === 0 && st.canProceed && st.nextButtonId && !media.isPlaying) {
+      // 1. Advance immediately if Next button is unlocked
+      if (st.canProceed && st.nextButtonId) {
         const b = resolveElement(st.nextButtonId);
-        if (b) await simulateClick(b);
-        await sleep(350);
-        continue;
+        if (b) {
+          await simulateClick(b);
+          await sleep(500);
+          continue;
+        }
       }
 
-      // Wait for the avatar to finish speaking and the options to become answerable
-      if (opts.length === 0 || media.isPlaying || st.canProceed) {
-        await sleep(150);
+      // 2. If no response options are visible yet, wait briefly for turn to load
+      if (opts.length === 0) {
+        await sleep(250);
         continue;
       }
 
@@ -3386,6 +3435,13 @@
       const hasMic = st.elements.some((e) => e.type === "mic_btn");
       let res = null;
       if (hasMic) {
+        // Wait up to 3s if mic button is currently disabled while avatar finishes talking
+        const micStart = Date.now();
+        while (Date.now() - micStart < 3000) {
+          const micEl = (inspectState().elements || []).find((e) => e.type === "mic_btn");
+          if (micEl && !micEl.disabled) break;
+          await sleep(150);
+        }
         res = await speakSinglePhrase(choice.id);
         const after = inspectState();
         if (!(res.success || after.canProceed)) {
@@ -3466,39 +3522,42 @@
           bullets.slice(0, 4).forEach((b, idx) => {
             const cleanB = b.replace(/^[•\-\d.)\s]+/, "").trim();
             if (idx === 0) {
-              bodySentences.push(`First of all, I was wondering regarding ${cleanB.replace(/[?.]+$/, "")}, as it would help us finalize our schedule.`);
+              bodySentences.push(`First of all, I would like to inquire regarding ${cleanB.replace(/[?.]+$/, "")}, as having accurate information will assist us in coordinating our schedule effectively.`);
             } else if (idx === 1) {
-              bodySentences.push(`In addition, would it be advisable to consider ${cleanB.replace(/[?.]+$/, "")} so that we can ensure complete coordination?`);
+              bodySentences.push(`In addition, would it be advisable to consider ${cleanB.replace(/[?.]+$/, "")} so that our team can ensure seamless alignment throughout the entire process?`);
             } else {
-              bodySentences.push(`Finally, could you please clarify ${cleanB.replace(/[?.]+$/, "")} at your earliest convenience?`);
+              bodySentences.push(`Finally, could you please clarify ${cleanB.replace(/[?.]+$/, "")} at your earliest convenience to help us avoid any potential misunderstandings?`);
             }
           });
         } else {
-          bodySentences.push("First of all, I would like to inquire about our project timeline and upcoming milestones.");
-          bodySentences.push("Furthermore, it would be advisable to review our strategic resources so that our team can achieve optimal efficiency.");
-          bodySentences.push("Finally, I would appreciate your guidance on the primary objectives we should prioritize over the next quarter.");
+          bodySentences.push("First of all, I would like to inquire about our project timeline, key objectives, and upcoming milestones.");
+          bodySentences.push("Furthermore, it would be highly beneficial to review our strategic resources so that our department can achieve optimal efficiency and long-term results.");
+          bodySentences.push("Finally, I would greatly appreciate your guidance on the primary responsibilities and priorities we should focus on over the next quarter.");
         }
 
         essayText = [
           "Dear Ms. Ross,",
           "",
-          "I hope this message finds you well. I am writing to provide an update and inquire about several important matters.",
+          "I hope this message finds you well. I am writing to provide a comprehensive update and discuss several important matters regarding our ongoing initiatives.",
           "",
           bodySentences.join(" "),
-          "Doing so will allow us sufficient time to incorporate all key insights into our overall plan and resolve any outstanding issues.",
+          "Taking these proactive steps will allow our team sufficient time to integrate all essential insights into the overall plan and achieve full alignment across all departments.",
           "",
-          "Thank you very much for your time, support, and guidance. I look forward to hearing your thoughts soon.",
+          "Thank you very much for your time, consideration, and continued support. I look forward to hearing your perspective and receiving your feedback soon.",
           "",
           "Sincerely,",
           "Chris Smith"
         ].join("\n");
       } else {
         essayText = [
-          "In modern professional environments, effective communication and strategic planning are essential components of sustainable success.",
-          "To begin with, addressing critical organizational challenges requires careful investigation and coordinated collaboration across all departments.",
-          "Furthermore, taking sufficient time to evaluate innovative solutions ensures that high standards of quality and efficiency are consistently maintained.",
-          "In conclusion, adopting a structured and proactive approach enables teams to achieve their objectives and deliver lasting value for the organization."
-        ].join("\n\n");
+          "In modern society and contemporary professional environments, effective communication, continuous adaptation, and strategic collaboration play an essential role in achieving long-term success.",
+          "",
+          "To begin with, addressing complex challenges requires careful preparation, clear analytical thinking, and coordinated cooperation across all involved parties. When individuals take sufficient time to thoroughly investigate relevant options and examine key details, they can consistently make well-informed decisions that benefit the entire organization.",
+          "",
+          "Furthermore, fostering an open and supportive environment encourages mutual understanding and significantly minimizes potential misunderstandings. Proactive dialogue enables teams to resolve conflicts constructively and maintain high standards of performance and productivity.",
+          "",
+          "In conclusion, adopting a structured, reflective, and collaborative mindset allows individuals to overcome unforeseen obstacles, enhance personal development, and deliver lasting, positive results in any demanding setting."
+        ].join("\n");
       }
     }
 
