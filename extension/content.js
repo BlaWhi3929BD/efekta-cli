@@ -1246,13 +1246,20 @@
         type = "next_btn";
         prefix = "next";
       }
-      // 8. Microphone / Record button
+      // 8. Microphone / Record button (excluding choices / radio buttons)
       else if (
-        cls.includes("mic") ||
-        cls.includes("record") ||
-        cls.includes("audio-recorder-btn") ||
-        /\b(record|speak|microphone|start recording|stop recording|click to record|запись)\b/i.test(
-          lowerText
+        role !== "radio" &&
+        role !== "checkbox" &&
+        role !== "option" &&
+        !cls.includes("option-button") &&
+        !cls.includes("response-option") &&
+        (
+          cls.includes("audio-recorder-btn") ||
+          cls.includes("mic-button") ||
+          cls.includes("speech-action-control") ||
+          (el.hasAttribute("data-qa") && el.getAttribute("data-qa") === "audio-record-or-play") ||
+          (/\b(start recording|stop recording|click to record|record audio|запись)\b/i.test(lowerText) &&
+            (tag === "button" || role === "button" || cls.includes("mic") || cls.includes("record")))
         )
       ) {
         type = "mic_btn";
