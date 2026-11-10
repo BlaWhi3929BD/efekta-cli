@@ -114,6 +114,7 @@ TURBO MACRO COMMANDS (1-Command-Per-Screen):
   dialogue [picks]             Conduct multi-turn AI avatar dialogues (handles speech & tap turns)
   essay ["<text>"]             Auto-write or type 80+ word formal essay/email, submit & pass evaluation
   sequence ["<words>"]         Auto-order tokens in tap-sequencing task, reset if needed & advance
+  lesson [next|list|<id>]      Select and start lesson autonomously (e.g. lesson next, lesson list, lesson U1L2)
   batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
 
 CORE COMMANDS:
@@ -363,6 +364,15 @@ func main() {
 			target = strings.Join(posArgs[1:], " ")
 		}
 		resp, err := execCommand(protocol.Command{Action: "sequence", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "lesson", "unit":
+		target := "next"
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "lesson", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 

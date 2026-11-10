@@ -340,6 +340,20 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 		{
+			"name":        "efekta_lesson",
+			"description": "Select, list, or start a lesson autonomously. Pass 'next' (or leave empty) to start the next incomplete lesson, 'list' to view all units & lessons with completion status, or pass a lesson identifier (e.g. 'U1L2', '1.2', 'Ordering a meal', 'close', 'resume').",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"target": map[string]interface{}{
+						"type":        "string",
+						"description": "Lesson target: 'next' (default), 'list', unit/lesson code like 'U1L1', 'U1L2', title keyword like 'reservation', 'resume', or 'close'",
+					},
+					"compact": map[string]interface{}{"type": "boolean", "description": "Strip coordinate dump (default: true)"},
+				},
+			},
+		},
+		{
 			"name":        "efekta_batch",
 			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'speak all', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
 			"inputSchema": map[string]interface{}{
@@ -454,6 +468,12 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 			tokens = "auto"
 		}
 		cmd = protocol.Command{Action: "sequence", Target: tokens}
+	case "efekta_lesson":
+		target := strArg("target")
+		if target == "" {
+			target = "next"
+		}
+		cmd = protocol.Command{Action: "lesson", Target: target}
 	case "efekta_solve":
 		strat := strArg("strategy")
 		switch strat {

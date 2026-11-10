@@ -53,6 +53,12 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 			subs = append(subs, BatchSubCommand{Action: "dialogue", Target: rest})
 		case "auto", "autopilot":
 			subs = append(subs, BatchSubCommand{Action: "autopilot", Target: rest})
+		case "lesson", "unit":
+			target := rest
+			if target == "" {
+				target = "next"
+			}
+			subs = append(subs, BatchSubCommand{Action: "lesson", Target: target})
 		case "essay", "write":
 			target := rest
 			if target == "" {

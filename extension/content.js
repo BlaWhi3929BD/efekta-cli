@@ -3635,10 +3635,17 @@
       }
 
       if (t === "unknown" && !st.canProceed) {
+        if (window.location.pathname.includes("/self-study")) {
+          const lRes = await executeLesson("next");
+          if (lRes.success) {
+            steps.push(`lesson: ${lRes.message}`);
+            continue;
+          }
+        }
         return finish({
           needsAgent: true,
           stoppedAt: "unknown",
-          message: "Not inside a lesson (dashboard or unknown page). Pick a lesson with 'click slot-N' and run 'autopilot' again."
+          message: "Not inside a lesson (dashboard or unknown page). Run 'efekta lesson next' to start the next lesson."
         });
       }
 
@@ -3647,6 +3654,381 @@
       (n.autoReadNotes || []).forEach((x) => notes.push(x));
     }
     return finish({ needsAgent: false, message: "Autopilot step budget reached - run 'autopilot' again to continue." });
+  }
+
+  // Turbo Action 12: Autonomous Lesson Selector & Navigator ("lesson")
+  // Syntax:
+  // - "list" / "ls": Return structured unit & lesson summary with status (available, completed, locked)
+  // - "next" / "" / "auto": Automatically find first incomplete available lesson and start it
+  // - "resume": Continue currently active/in-progress lesson
+  // - "close" / "exit": Close active lesson and return to self-study overview
+  // - Spec: "U1L2", "1.2", "L2", "2", "final test", or search keyword ("Ordering a meal", "reservation")
+  async function executeLesson(spec = "next") {
+    const raw = (spec || "").trim();
+    const query = raw.toLowerCase();
+
+    // 0. Handle close / exit
+    if (query === "close" || query === "exit") {
+      const docs = getAllDocs();
+      for (const doc of docs) {
+        const closeBtn = doc.querySelector(
+          "button.close-button, button[aria-label*='Close lesson'], [data-id*='close-lesson']"
+        );
+        if (closeBtn && isVisible(closeBtn)) {
+          await simulateClick(closeBtn);
+          break;
+        }
+      }
+      try {
+        chrome.runtime.sendMessage({
+          type: "NAVIGATE_TAB",
+          url: "https://learn.better.efekta.com/gap/ui/self-study"
+        });
+      } catch (_) {}
+      await sleep(600);
+      return { success: true, message: "Closed lesson, returned to course overview" };
+    }
+
+    // 1. If currently inside a lesson player and user requested something other than "resume":
+    const isInLessonView =
+      window.location.pathname.includes("/lesson-view") ||
+      getAllDocs().some((d) =>
+        d.querySelector("ef-lesson-player, .lesson-header, ef-lesson-overview, ef-activity")
+      );
+
+    if (isInLessonView) {
+      if (query === "resume") {
+        return await executeAutoNext(4);
+      }
+      // Need to exit first to access unit list
+      const docs = getAllDocs();
+      for (const doc of docs) {
+        const closeBtn = doc.querySelector(
+          "button.close-button, button[aria-label*='Close lesson'], [data-id*='close-lesson']"
+        );
+        if (closeBtn && isVisible(closeBtn)) {
+          await simulateClick(closeBtn);
+          break;
+        }
+      }
+      try {
+        chrome.runtime.sendMessage({
+          type: "NAVIGATE_TAB",
+          url: "https://learn.better.efekta.com/gap/ui/self-study"
+        });
+      } catch (_) {}
+
+      // Wait for navigation back to /gap/ui/self-study
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 5000) {
+        await sleep(250);
+        if (
+          window.location.pathname.includes("/self-study") &&
+          !window.location.pathname.includes("/lesson-view")
+        ) {
+          break;
+        }
+      }
+      await sleep(500);
+    }
+
+    // 2. If on /gap/ui/home, navigate to /gap/ui/self-study
+    if (window.location.pathname.includes("/home")) {
+      const docs = getAllDocs();
+      for (const doc of docs) {
+        if (query === "resume") {
+          const continueBtn = Array.from(doc.querySelectorAll("button, a")).find(
+            (b) => isVisible(b) && /continue lesson/i.test(cleanText(b))
+          );
+          if (continueBtn) {
+            await simulateClick(continueBtn);
+            break;
+          }
+        }
+        const studyLink = Array.from(doc.querySelectorAll("a, button")).find(
+          (b) =>
+            isVisible(b) &&
+            (/^study$/i.test(cleanText(b)) || (b.getAttribute("href") || "").includes("/self-study"))
+        );
+        if (studyLink) {
+          await simulateClick(studyLink);
+          break;
+        }
+      }
+      const waitStart = Date.now();
+      while (Date.now() - waitStart < 5000) {
+        await sleep(250);
+        if (window.location.pathname.includes("/self-study")) break;
+      }
+      await sleep(500);
+    }
+
+    // 3. We are on /gap/ui/self-study. Wait up to 3.5s for unit sections to load.
+    let units = [];
+    let testCard = null;
+    let currentLevel = "";
+    const loadStart = Date.now();
+    while (Date.now() - loadStart < 4000) {
+      const docs = getAllDocs();
+      for (const doc of docs) {
+        const levelHeader = doc.querySelector(
+          "[data-id='level-view-header'], .sticky h1, .sticky [class*='text'], main > div > div:first-child"
+        );
+        if (levelHeader && !currentLevel) {
+          const txt = cleanText(levelHeader);
+          if (/level\s*\d+/i.test(txt)) currentLevel = txt;
+        }
+
+        const sectionEls = Array.from(
+          doc.querySelectorAll("div[data-id^='selfStudy-level-view-list-section-unit-']")
+        );
+        if (sectionEls.length > 0) {
+          units = sectionEls.map((sec, sIdx) => {
+            const m = (sec.getAttribute("data-id") || "").match(/unit-(\d+)/);
+            const unitNum = m ? parseInt(m[1], 10) : sIdx + 1;
+            const h2 = sec.querySelector("h2[data-id^='unit-']");
+            const unitTitle = h2 ? cleanText(h2) : `Unit ${unitNum}`;
+
+            const cardEls = Array.from(
+              sec.querySelectorAll(
+                "div[role='link'], div[data-id^='lesson-card-'] > div[role='link']"
+              )
+            );
+            const uniqueCards = [];
+            const seen = new Set();
+            for (const c of cardEls) {
+              const h3 = c.querySelector("h3[data-id$='-title']") || c.querySelector("h3");
+              const title = h3 ? cleanText(h3) : c.getAttribute("aria-label") || cleanText(c);
+              if (title && !seen.has(title)) {
+                seen.add(title);
+                uniqueCards.push(c);
+              }
+            }
+
+            const lessons = uniqueCards.map((linkEl, lIdx) => {
+              const h3 = linkEl.querySelector("h3[data-id$='-title']") || linkEl.querySelector("h3");
+              const lessonTitle = h3 ? cleanText(h3) : "";
+              const aria = linkEl.getAttribute("aria-label") || "";
+              const lm =
+                aria.match(/Lesson\s*(\d+)/i) ||
+                (linkEl.parentElement?.getAttribute("data-id") || "").match(/lesson-card-(\d+)/);
+              const lessonNum = lm ? parseInt(lm[1], 10) : lIdx + 1;
+
+              const isLocked =
+                linkEl.getAttribute("aria-disabled") === "true" ||
+                linkEl.classList.contains("cursor-not-allowed") ||
+                linkEl.querySelector("div[class*='rounded-full'], svg[data-icon='lock']") !== null;
+
+              const isCompleted =
+                linkEl.innerText.includes("100%") ||
+                linkEl.querySelector("[data-icon='check'], .is-passed, .completed") !== null ||
+                aria.toLowerCase().includes("completed");
+
+              const status = isCompleted ? "completed" : isLocked ? "locked" : "available";
+              const code = `U${unitNum}L${lessonNum}`;
+
+              return {
+                unit: unitNum,
+                lesson: lessonNum,
+                code,
+                title: lessonTitle || aria.replace(/^Lesson \d+ of \d+, /i, ""),
+                status,
+                completed: isCompleted,
+                locked: isLocked,
+                element: linkEl
+              };
+            });
+
+            return {
+              unit: unitNum,
+              title: unitTitle,
+              lessons
+            };
+          });
+
+          // Check final test card
+          const testEl = doc.querySelector("div[data-id='level-view-test-card']");
+          if (testEl) {
+            const testBtn = testEl.querySelector("button, a, div[role='button']");
+            const testLocked =
+              testEl.innerText.includes("locked") || testBtn?.getAttribute("aria-disabled") === "true";
+            testCard = {
+              title: "Take the final test",
+              code: "TEST",
+              status: testLocked ? "locked" : "available",
+              element: testBtn || testEl
+            };
+          }
+          break;
+        }
+      }
+      if (units.length > 0) break;
+      await sleep(250);
+    }
+
+    if (units.length === 0) {
+      return {
+        success: false,
+        error: "Could not find unit or lesson cards on page. Make sure you are on Efekta course page."
+      };
+    }
+
+    // 4. If target is "list" or "ls": return structured summary
+    if (query === "list" || query === "ls") {
+      let nextLesson = null;
+      for (const u of units) {
+        for (const l of u.lessons) {
+          if (l.status === "available" && !l.completed) {
+            nextLesson = { code: l.code, title: l.title, unit: l.unit, lesson: l.lesson };
+            break;
+          }
+        }
+        if (nextLesson) break;
+      }
+      if (!nextLesson && testCard && testCard.status === "available") {
+        nextLesson = { code: "TEST", title: testCard.title };
+      }
+
+      const cleanUnits = units.map((u) => ({
+        unit: u.unit,
+        title: u.title,
+        lessons: u.lessons.map((l) => ({
+          unit: l.unit,
+          lesson: l.lesson,
+          code: l.code,
+          title: l.title,
+          status: l.status,
+          completed: l.completed,
+          locked: l.locked
+        }))
+      }));
+
+      return {
+        success: true,
+        message: `Course status: ${currentLevel || "Current Level"} - Next: ${
+          nextLesson ? nextLesson.code + " (" + nextLesson.title + ")" : "All done!"
+        }`,
+        data: {
+          currentLevel,
+          nextLesson,
+          units: cleanUnits,
+          finalTest: testCard
+            ? { code: testCard.code, title: testCard.title, status: testCard.status }
+            : null
+        }
+      };
+    }
+
+    // 5. Find target lesson
+    let target = null;
+
+    if (query === "next" || query === "" || query === "auto") {
+      for (const u of units) {
+        for (const l of u.lessons) {
+          if (l.status === "available" && !l.completed) {
+            target = l;
+            break;
+          }
+        }
+        if (target) break;
+      }
+      if (!target && testCard && testCard.status === "available") {
+        target = testCard;
+      }
+    } else if (/^u?(\d+)[._\-l](\d+)$/i.test(query)) {
+      const m = query.match(/^u?(\d+)[._\-l](\d+)$/i);
+      const reqU = parseInt(m[1], 10);
+      const reqL = parseInt(m[2], 10);
+      const u = units.find((x) => x.unit === reqU);
+      if (u) {
+        target = u.lessons.find((x) => x.lesson === reqL);
+      }
+    } else if (/^(?:unit|u)\s*(\d+)$/i.test(query)) {
+      const reqU = parseInt(query.match(/^(?:unit|u)\s*(\d+)$/i)[1], 10);
+      const u = units.find((x) => x.unit === reqU);
+      if (u) {
+        target = u.lessons.find((x) => x.status === "available" && !x.completed) || u.lessons[0];
+      }
+    } else if (/^(?:lesson|l)?\s*(\d+)$/i.test(query)) {
+      const reqL = parseInt(query.match(/^(?:lesson|l)?\s*(\d+)$/i)[1], 10);
+      const activeUnit = units.find((u) => u.lessons.some((l) => l.status === "available")) || units[0];
+      if (activeUnit) {
+        target = activeUnit.lessons.find((l) => l.lesson === reqL);
+      }
+    } else if (query.includes("test")) {
+      target = testCard;
+    } else {
+      for (const u of units) {
+        for (const l of u.lessons) {
+          if (l.title.toLowerCase().includes(query)) {
+            target = l;
+            break;
+          }
+        }
+        if (target) break;
+      }
+    }
+
+    if (!target) {
+      return {
+        success: false,
+        error: `Could not find lesson matching "${spec}". Run 'efekta lesson list' to see available lessons.`
+      };
+    }
+
+    if (target.locked || target.status === "locked") {
+      return {
+        success: false,
+        error: `Lesson ${target.code || ""} (${target.title}) is locked. Complete preceding units first.`
+      };
+    }
+
+    // 6. Click target lesson card
+    const clickTarget = target.element.querySelector("h3") || target.element;
+    try {
+      clickTarget.scrollIntoView({ behavior: "instant", block: "center" });
+    } catch (_) {}
+    await sleep(150);
+    await simulateClick(clickTarget);
+
+    // 7. Wait for lesson player to mount
+    const navStart = Date.now();
+    let mounted = false;
+    while (Date.now() - navStart < 6000) {
+      await sleep(250);
+      if (
+        window.location.pathname.includes("/lesson-view") ||
+        getAllDocs().some((d) =>
+          d.querySelector("ef-lesson-player, .lesson-header, ef-lesson-overview, ef-activity")
+        )
+      ) {
+        mounted = true;
+        break;
+      }
+    }
+
+    // 8. Auto-advance through overview/intro screens to land directly on Step 1
+    let autoRes = null;
+    if (mounted) {
+      await sleep(500);
+      autoRes = await executeAutoNext(4);
+    }
+
+    let st = inspectState();
+    st = await autoPeekSelectionGapOptions(st);
+
+    return {
+      success: true,
+      message: `Started ${target.code || ""}: ${target.title}`,
+      lesson: {
+        code: target.code,
+        title: target.title,
+        unit: target.unit,
+        lesson: target.lesson
+      },
+      autoAdvance: autoRes,
+      data: st
+    };
   }
 
   async function executeSingleCommand(cmd) {
@@ -3717,6 +4099,10 @@
       case "dialogue":
       case "avatar": {
         return await executeDialogue(cmd.target || cmd.text || "");
+      }
+      case "lesson":
+      case "unit": {
+        return await executeLesson(cmd.target || cmd.text || "next");
       }
       case "auto":
       case "autopilot": {

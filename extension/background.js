@@ -521,6 +521,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  if (msg && msg.type === "NAVIGATE_TAB" && msg.url && sender && sender.tab) {
+    chrome.tabs.update(sender.tab.id, { url: msg.url }, (tab) => {
+      sendResponse({ ok: true, tabId: tab ? tab.id : null });
+    });
+    return true;
+  }
+
   // Fetch cross-origin reference audio bytes for Voice Engine
   if (msg && msg.type === "FETCH_AUDIO_B64" && msg.url) {
     (async () => {

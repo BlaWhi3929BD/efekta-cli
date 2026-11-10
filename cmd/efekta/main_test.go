@@ -39,11 +39,11 @@ func TestParseBatchString(t *testing.T) {
 }
 
 func TestParseTurboBatchCommands(t *testing.T) {
-	input := `pick opt-1,opt-3; pair slot-1:item-3, slot-2:item-1; sort slot-1:item-1,item-2; gaps wait, better, time; essay auto; sequence First time; speak all; next`
+	input := `pick opt-1,opt-3; pair slot-1:item-3, slot-2:item-1; sort slot-1:item-1,item-2; gaps wait, better, time; essay auto; sequence First time; speak all; lesson U1L2; next`
 	cmds := ParseBatchString(input)
 
-	if len(cmds) != 8 {
-		t.Fatalf("expected 8 turbo batch commands, got %d: %+v", len(cmds), cmds)
+	if len(cmds) != 9 {
+		t.Fatalf("expected 9 turbo batch commands, got %d: %+v", len(cmds), cmds)
 	}
 	if cmds[0].Action != "pick" || cmds[0].Target != "opt-1,opt-3" {
 		t.Errorf("unexpected pick cmd: %+v", cmds[0])
@@ -66,7 +66,10 @@ func TestParseTurboBatchCommands(t *testing.T) {
 	if cmds[6].Action != "speak" || cmds[6].Target != "all" {
 		t.Errorf("unexpected speak cmd: %+v", cmds[6])
 	}
-	if cmds[7].Action != "next" || cmds[7].Amount != 9 {
-		t.Errorf("unexpected next cmd: %+v", cmds[7])
+	if cmds[7].Action != "lesson" || cmds[7].Target != "U1L2" {
+		t.Errorf("unexpected lesson cmd: %+v", cmds[7])
+	}
+	if cmds[8].Action != "next" || cmds[8].Amount != 9 {
+		t.Errorf("unexpected next cmd: %+v", cmds[8])
 	}
 }

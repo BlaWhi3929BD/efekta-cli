@@ -325,7 +325,7 @@ func CommandTimeout(cmd protocol.Command) time.Duration {
 			}
 		}
 		return 60 * time.Second
-	case "speak", "skip", "skip_speaking", "solve_choice", "wait", "next", "sort", "pair", "gaps", "essay", "sequence":
+	case "speak", "skip", "skip_speaking", "solve_choice", "wait", "next", "sort", "pair", "gaps", "essay", "sequence", "lesson":
 		return 60 * time.Second
 	}
 	return 25 * time.Second

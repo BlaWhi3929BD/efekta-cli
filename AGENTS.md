@@ -21,6 +21,13 @@ This repository provides **`efekta` v3.0 (Turbo Autonomous Engine)**, an ultra-f
    efekta skip --json -c
    ```
    This automatically skips ALL 5–7 phrases in the drill in 1 single shot and advances!
+5. **NEVER CLICK LESSONS MANUALLY — USE `efekta lesson`:**
+   Start, list, or transition between lessons in 1 shot:
+   ```bash
+   efekta lesson next --json -c   # Auto-detects & starts next incomplete lesson!
+   efekta lesson list --json -c   # View all units, lessons, completion status & next lesson
+   efekta lesson U1L2 --json -c   # Directly jumps to Unit 1 Lesson 2
+   ```
 
 ---
 
@@ -30,6 +37,7 @@ Look at `data.agentHint.exerciseType` from your last response and immediately ru
 
 | `exerciseType` | What You See in `agentHint` | Single Command to Execute |
 | :--- | :--- | :--- |
+| `course_overview` / `unknown` (dashboard) | On course page (`/gap/ui/self-study`) | `efekta lesson next --json -c` *(or `efekta auto --json -c`)* |
 | `passive_screen` / `lesson_overview` | `canProceed: true` or `stage-1..stage-N` | `efekta next --json -c` *(or `efekta auto --json -c`)* |
 | `multiple_choice` (1 answer) | `options: ["opt-1: ...", "opt-2: ..."]` | `efekta batch "solve choice; next" --json -c` *(or `efekta batch "pick opt-2; next" --json -c`)* |
 | `multiple_choice` (multi-select) | Prompt says *"Choose three"* + `options` | `efekta batch "solve choice; next" --json -c` *(or `efekta batch "pick opt-1,opt-3,opt-5; next" --json -c`)* |
@@ -112,3 +120,15 @@ efekta batch "sequence 'First time. Yeah, that\\'s right.'; next" --json -c
 ```
 - Automatically resets any tokens already placed in the ordered list back to the pool.
 - Clicks each token in exact target order and clicks Check to advance.
+
+### `lesson` — Autonomous Lesson Selector & Navigator
+```bash
+efekta lesson next --json -c       # Automatically find & start next incomplete lesson
+efekta lesson list --json -c       # View structured units, lessons & progress summary
+efekta lesson U1L2 --json -c       # Jump directly to Unit 1 Lesson 2
+efekta lesson "Ordering" --json -c # Search lesson title by keyword
+efekta lesson resume --json -c     # Continue current in-progress lesson
+efekta lesson close --json -c      # Exit current lesson back to course overview
+```
+- Works from anywhere: course dashboard (`/gap/ui/self-study`), home page (`/gap/ui/home`), or inside an active lesson player (`/gap/ui/self-study/lesson-view`).
+- When launching a lesson, automatically scrolls to the card, clicks it, waits for the lesson player to mount, and fast-forwards through overview/objectives (`autoNext(4)`) to land directly on Step 1!
