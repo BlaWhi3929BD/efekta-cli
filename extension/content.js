@@ -307,6 +307,48 @@
   async function simulateDragAndDrop(sourceEl, targetEl) {
     if (!sourceEl || !targetEl) return false;
 
+    // Special handling for Angular CDK sortable list items via accessibility keyboard controls
+    try {
+      const isCdkSortItem = (el) =>
+        el &&
+        (el.tagName === "EF-SEQUENCING-SORT-COLUMN-ITEM" ||
+          (el.closest && el.closest("ef-sequencing-sort-column-item, .cdk-drop-list")));
+      if (isCdkSortItem(sourceEl) && isCdkSortItem(targetEl)) {
+        const srcId = sourceEl.getAttribute("data-efekta-id") || "";
+        const dstId = targetEl.getAttribute("data-efekta-id") || "";
+        const r = await callVoiceBridge({
+          type: "eval",
+          code: `
+            const items = Array.from(document.querySelectorAll('ef-sequencing-sort-column-item'));
+            const s = document.querySelector('[data-efekta-id="${srcId}"]') || items[0];
+            const d = document.querySelector('[data-efekta-id="${dstId}"]') || items[1];
+            if (!s || !d) return false;
+            const sIdx = items.indexOf(s);
+            const dIdx = items.indexOf(d);
+            if (sIdx === -1 || dIdx === -1 || sIdx === dIdx) return false;
+            s.focus();
+            const p = (k, c, code) => {
+              document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
+              document.activeElement.dispatchEvent(new KeyboardEvent('keyup', { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
+            };
+            p(' ', 'Space', 32);
+            const diff = sIdx - dIdx;
+            if (diff > 0) {
+              for (let k = 0; k < diff; k++) p('ArrowUp', 'ArrowUp', 38);
+            } else {
+              for (let k = 0; k < Math.abs(diff); k++) p('ArrowDown', 'ArrowDown', 40);
+            }
+            p(' ', 'Space', 32);
+            return true;
+          `
+        });
+        if (r && r.ok && r.result) {
+          await sleep(60);
+          return true;
+        }
+      }
+    } catch (_) {}
+
     try {
       sourceEl.scrollIntoView({ behavior: "instant", block: "center" });
       targetEl.scrollIntoView({ behavior: "instant", block: "center" });
@@ -546,7 +588,50 @@
       new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" })
     );
 
-    const stepDelay = str.length > 80 ? 1 : (delayMs || 4);
+    if (str.length > 50) {
+      setNativeValue(el, str);
+      el.dispatchEvent(
+        new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: str
+        })
+      );
+      el.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: false,
+          inputType: "insertText",
+          data: str
+        })
+      );
+      el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+      el.dispatchEvent(new FocusEvent("blur", { bubbles: true, composed: true }));
+
+      try {
+        const efId = el.getAttribute("data-efekta-id") || "";
+        await callVoiceBridge({
+          type: "eval",
+          code: `
+            const targetEl = (document.querySelector('[data-efekta-id="${efId}"]')) || document.querySelector('textarea') || document.querySelector('input');
+            if (targetEl) {
+              const wci = targetEl.closest ? targetEl.closest('ef-writing-challenge-input') : null;
+              if (wci && wci.__zone_symbol__onInputChangedfalse) {
+                const z = wci.__zone_symbol__onInputChangedfalse;
+                if (z && z[0] && typeof z[0].callback === 'function') {
+                  z[0].callback(targetEl.value);
+                }
+              }
+            }
+          `
+        });
+      } catch (_) {}
+      await sleep(60);
+      return true;
+    }
+
+    const stepDelay = delayMs || 4;
     let current = "";
     for (const ch of str) {
       current += ch;
@@ -935,7 +1020,10 @@
       "ef-activity-navigator",
       "ef-speaking-practice-task",
       "ef-multiple-choice-speech-task",
-      ".step-overview-list"
+      ".step-overview-list",
+      ".cdk-drop-list",
+      "[cdkdroplist]",
+      ".drop-list"
     ].join(",");
 
     const chromeNoiseRegex =
@@ -1187,12 +1275,13 @@
         !cls.includes("flip-btn") &&
         tag !== "ef-flashcard" &&
         !cls.includes("flashcard") &&
-        tag !== "ef-sequencing-sort-column-item" &&
         !(el.closest && el.closest("ef-flashcards-task, .flashcard-wp")) &&
         (el.getAttribute("draggable") === "true" ||
           el.hasAttribute("data-rbd-draggable-id") ||
           el.hasAttribute("cdkdrag") ||
           cls.includes("cdk-drag") ||
+          cls.includes("drop-list-item") ||
+          tag === "ef-sequencing-sort-column-item" ||
           cls.includes("draggable") ||
           cls.includes("word-chip") ||
           cls.includes("chip") ||
@@ -2270,7 +2359,9 @@
       if (!st.canProceed && st.elements.some((e) => e.type === "next_btn" && e.disabled)) {
         const docs = getAllDocs();
         for (const doc of docs) {
-          const scrollables = doc.querySelectorAll(".task-area, [cdkscrollable], .tasks-scroll-internal");
+          const scrollables = doc.querySelectorAll(
+            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable']"
+          );
           for (const el of scrollables) {
             if (el.scrollHeight > el.clientHeight + 10) {
               el.scrollTop = el.scrollHeight;
@@ -4139,7 +4230,9 @@
         const dy = cmd.amount || (cmd.direction === "up" ? -400 : 400);
         const docs = getAllDocs();
         for (const doc of docs) {
-          const scrollables = doc.querySelectorAll(".task-area, [cdkscrollable], .tasks-scroll-internal");
+          const scrollables = doc.querySelectorAll(
+            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable']"
+          );
           for (const el of scrollables) {
             if (el.scrollHeight > el.clientHeight) {
               el.scrollTop += dy;
