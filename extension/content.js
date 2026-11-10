@@ -2051,6 +2051,11 @@
       let quoteChar = "";
       for (let i = 0; i < raw.length; i++) {
         const c = raw[i];
+        // Word-internal apostrophes (e.g. didn't, don't, it's, I'm) are not quote delimiters!
+        if (c === "'" && i > 0 && i < raw.length - 1 && /[a-zA-Z]/.test(raw[i - 1]) && /[a-zA-Z]/.test(raw[i + 1])) {
+          current += c;
+          continue;
+        }
         if ((c === '"' || c === "'") && (i === 0 || raw[i - 1] !== "\\")) {
           if (!inQuote) {
             inQuote = true;
@@ -2493,6 +2498,68 @@
           if (domSkip) {
             await simulateClick(domSkip);
             clickedTarget = skipEl.id;
+          }
+        }
+      }
+
+      // Priority 4: Activity Navigator caterpillar circle (e.g. act-5/act-6 when activity needs unlocking)
+      if (!clickedTarget) {
+        const docs = getAllDocs();
+        for (const doc of docs) {
+          const catItems = Array.from(doc.querySelectorAll("ef-circular-progress .wp, .segment-wp .wp")).filter(isVisible);
+          if (catItems.length > 0) {
+            const canPass = catItems.find((c) => c.querySelector(".can-pass, .summary"));
+            if (canPass) {
+              await simulateClick(canPass);
+              await sleep(250);
+              const retrySt = inspectState();
+              if (retrySt.canProceed && retrySt.nextButtonId) {
+                const btn = resolveElement(retrySt.nextButtonId);
+                if (btn) {
+                  await simulateClick(btn);
+                  clickedTarget = "cat-progress-advance";
+                  break;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      // Priority 5: Presentation/reading cards with audio/video buttons locking Next
+      if (!clickedTarget && !st.canProceed) {
+        const docs = getAllDocs();
+        let unlockedMedia = false;
+        for (const doc of docs) {
+          const mediaAudioBtns = Array.from(
+            doc.querySelectorAll(".audio-btn, button[aria-label^='Play audio'], button[data-qa='media-playback-control']")
+          ).filter(isVisible);
+          if (mediaAudioBtns.length > 0) {
+            for (const b of mediaAudioBtns) {
+              await simulateClick(b);
+              await sleep(60);
+            }
+            unlockedMedia = true;
+          }
+          const mediaVideos = Array.from(doc.querySelectorAll("video, audio")).filter(
+            (m) => isFinite(m.duration) && m.duration > 0 && !m.ended
+          );
+          if (mediaVideos.length > 0) {
+            for (const v of mediaVideos) {
+              try { v.currentTime = Math.max(0, v.duration - 0.1); } catch (_) {}
+            }
+            unlockedMedia = true;
+          }
+        }
+        if (unlockedMedia) {
+          await sleep(300);
+          const checkSt = inspectState();
+          if (checkSt.canProceed && checkSt.nextButtonId) {
+            const btn = resolveElement(checkSt.nextButtonId);
+            if (btn) {
+              await simulateClick(btn);
+              clickedTarget = checkSt.nextButtonId;
+            }
           }
         }
       }
