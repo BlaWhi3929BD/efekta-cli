@@ -41,8 +41,9 @@ type AgentHint struct {
 type PageState struct {
 	URL           string      `json:"url"`
 	Title         string      `json:"title"`
-	ExerciseType  string      `json:"exerciseType"` // matching_pairs, categorize_columns, selection_gaps, fill_in_the_blanks, order_sentence, multiple_choice, speaking_avatar, passive_screen, lesson_overview
-	Prompt        string      `json:"prompt,omitempty"`
+	ExerciseType   string      `json:"exerciseType"` // matching_pairs, categorize_columns, selection_gaps, fill_in_the_blanks, order_sentence, multiple_choice, progress_test_choice, speaking_avatar, passive_screen, lesson_overview
+	IsProgressTest bool        `json:"isProgressTest,omitempty"`
+	Prompt         string      `json:"prompt,omitempty"`
 	ContextText   []string    `json:"contextText,omitempty"`
 	Feedback      string      `json:"feedback,omitempty"`
 	AgentHint     *AgentHint  `json:"agentHint,omitempty"`

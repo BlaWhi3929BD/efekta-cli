@@ -133,6 +133,6 @@ efekta screen -o screenshot.png
 ## Progress Test Protocol ("Take the final test")
 
 On regular lessons, trial-and-error (`solve choice`) is allowed. However, on the **Progress Test**:
-1. **NO TRIAL-AND-ERROR / BRUTE FORCE:** Questions are single-shot exams without retries. Every wrong answer permanently lowers the proficiency certificate score.
+1. **AUTOMATIC SAFEGUARD & NO TRIAL-AND-ERROR:** Questions are single-shot formal assessments without retries. Every wrong answer permanently lowers the proficiency certificate score. The engine automatically detects the Progress Test (`exerciseType: "progress_test_choice"`), active safeguards disallow `solve choice` and `auto`, preventing accidental score degradation.
 2. **LINGUISTIC DERIVATION:** Every option must be derived through careful grammatical, semantic, and context-specific linguistic analysis.
-3. **SUBMISSION:** Use `efekta batch "pick opt-X; next" --json -c` only after confirming the correct choice.
+3. **SUBMISSION:** Use `efekta batch "pick opt-X; next" --json -c` after deriving the exact grammatically correct choice.

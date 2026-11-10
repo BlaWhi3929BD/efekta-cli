@@ -373,7 +373,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_solve",
-			"description": "Run built-in smart solver for Efekta exercises: 'choice' (brute-forces multiple choice options until next unlocks), 'sentence' (analyzes word ordering using capital first letter / 'I' rule and ending punctuation .?!), or 'speak' (waits for video avatar to finish talking, then injects 3 synthetic speech attempts to unlock manual text choices).",
+			"description": "Run built-in smart solver for Efekta exercises: 'choice' (solves multiple choice options on regular lessons; automatically blocked on Progress Tests to protect exam score), 'sentence' (analyzes word ordering), or 'speak' (skips pronunciation drills).",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

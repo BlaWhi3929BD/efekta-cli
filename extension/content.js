@@ -927,6 +927,35 @@
     };
   }
 
+  // True if currently on a formal assessment / Progress Test ("Take the final test")
+  // Brute-force / trial-and-error solver is strictly forbidden on progress tests to protect the score.
+  function isProgressTest(docs) {
+    docs = docs || getAllDocs();
+    for (const doc of docs) {
+      if (
+        doc.querySelector("ef-test-player, ef-test-header, ef-assessment-test, [class*='test-header'], [data-id*='test-player']") ||
+        /progress\s*test|final\s*test|assessment\s*test/i.test(doc.title || "")
+      ) {
+        return true;
+      }
+      // Test-specific not-assessed option buttons in Efekta Catalyst
+      if (doc.querySelector(".option-button.not-assessed, button.not-assessed")) {
+        return true;
+      }
+      // Check headers and breadcrumbs
+      const headers = doc.querySelectorAll("header, .header, .lesson-header, .top-bar, .activity-bar, ef-activity-navigator, .breadcrumbs");
+      for (const h of headers) {
+        if (/progress\s*test|final\s*test/i.test(cleanText(h))) return true;
+      }
+      // Check instructions
+      const instructions = doc.querySelectorAll("ef-instructions, .instructions, .task-instruction, .modal-title");
+      for (const inst of instructions) {
+        if (/progress\s*test|final\s*test/i.test(cleanText(inst))) return true;
+      }
+    }
+    return false;
+  }
+
   // Build rich, noise-free semantic page state + instant agentHint for AI agents
   function inspectState() {
     elementRegistry.clear();
@@ -1677,9 +1706,15 @@
         }
       }
     } else if (choiceEls.length >= 2) {
-      exerciseType = "multiple_choice";
-      actionTemplate = `efekta batch "pick opt-1; next" --json -c`;
-      summary = `Pick the right option(s) from ${choiceEls.length} choices and auto-advance with '; next'.`;
+      if (isProgressTest(docs)) {
+        exerciseType = "progress_test_choice";
+        actionTemplate = `efekta batch "pick opt-X; next" --json -c`;
+        summary = `PROGRESS TEST: Single-shot formal assessment. Trial-and-error ('solve choice') is disabled to protect your certificate score. Derive the linguistically correct choice and submit with 'pick opt-X; next'.`;
+      } else {
+        exerciseType = "multiple_choice";
+        actionTemplate = `efekta batch "pick opt-1; next" --json -c`;
+        summary = `Pick the right option(s) from ${choiceEls.length} choices and auto-advance with '; next'.`;
+      }
     } else if (stageEls.length >= 2 && !nextBtn) {
       exerciseType = "lesson_overview";
       actionTemplate = `efekta next --json -c`;
@@ -1741,6 +1776,7 @@
       url: window.location.href,
       title: document.title,
       exerciseType,
+      isProgressTest: isProgressTest(docs),
       prompt,
       contextText: contextLines.slice(0, 12),
       feedback,
@@ -2287,6 +2323,7 @@
       t === "writing_essay" ||
       t === "order_sentence" ||
       t === "multiple_choice" ||
+      t === "progress_test_choice" ||
       t === "speaking_practice" ||
       t === "speaking_avatar"
     ) {
@@ -3050,6 +3087,12 @@
 
   // Solver 1: Multiple Choice Smart Solver (Single & Multi-Select with Instant Incorrect Abort)
   async function solveMultipleChoice(delayMs = 100) {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve choice') is strictly disabled on formal tests to protect your certificate score! Please analyze the question grammatically and use 'pick opt-X; next'."
+      };
+    }
     await dismissOverlaysIfPresent();
     const initialState = inspectState();
     let candidateMeta = initialState.elements.filter((e) => e.type === "choice" && !e.disabled);
@@ -3802,8 +3845,37 @@
     let targetTokens = [];
     const raw = String(spec || "").trim();
     if (raw && raw.toLowerCase() !== "auto") {
-      if (raw.includes(",") && !raw.includes(" ")) {
+      const poolButtons = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
+      const poolTexts = poolButtons.map((b) => cleanText(b));
+      const hasMultiWordButtons = poolTexts.some((t) => t.includes(" "));
+
+      if (raw.includes("|")) {
+        targetTokens = raw.split("|").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      } else if (raw.includes(",") && poolTexts.every((t) => !t.includes(","))) {
         targetTokens = raw.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      } else if (hasMultiWordButtons) {
+        // Greedily match available pool buttons against the sentence text from left to right!
+        let rem = raw.replace(/\s+/g, " ");
+        while (rem.trim().length > 0) {
+          const avail = poolTexts.filter((t) => !targetTokens.includes(t));
+          avail.sort((a, b) => b.length - a.length);
+          const found = avail.find((t) => {
+            const nt = t.toLowerCase().replace(/['’`]/g, "'");
+            const nr = rem.toLowerCase().replace(/['’`]/g, "'");
+            return nr.startsWith(nt) || nr.replace(/^[,.?!:;\s]+/, "").startsWith(nt.replace(/^[,.?!:;\s]+/, ""));
+          });
+          if (found) {
+            targetTokens.push(found);
+            const idx = rem.toLowerCase().indexOf(found.toLowerCase());
+            rem = (idx !== -1 ? rem.slice(idx + found.length) : rem.slice(found.length)).trim();
+          } else {
+            const m = rem.match(/^\S+/);
+            if (m) {
+              targetTokens.push(m[0]);
+              rem = rem.slice(m[0].length).trim();
+            } else break;
+          }
+        }
       } else {
         targetTokens = raw.split(/\s+/).filter(Boolean);
       }
@@ -3817,6 +3889,7 @@
     }
 
     const norm = (s) => String(s || "").replace(/\\/g, "").replace(/['’`"]/g, "'").trim().toLowerCase();
+    const normNoPunct = (s) => norm(s).replace(/[.,!?;:()]/g, "");
     const clicked = [];
     for (const token of targetTokens) {
       await waitUntilUnlocked(600);
@@ -3824,6 +3897,8 @@
       const cleanTarget = norm(token);
       const matchBtn =
         poolButtons.find((b) => norm(cleanText(b)) === cleanTarget) ||
+        poolButtons.find((b) => normNoPunct(cleanText(b)) === normNoPunct(cleanTarget)) ||
+        poolButtons.find((b) => cleanTarget.includes(norm(cleanText(b)))) ||
         poolButtons.find((b) => norm(cleanText(b)).includes(cleanTarget)) ||
         poolButtons.find((b) => b.getAttribute("data-efekta-id") === token);
 
@@ -3907,6 +3982,14 @@
         const n = await executeAutoNext(9);
         (n.autoReadNotes || []).forEach((x) => notes.push(x));
         continue;
+      }
+
+      if (t === "progress_test_choice" || (isProgressTest() && t === "multiple_choice")) {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "progress_test_choice",
+          message: "Progress Test detected: autopilot stopped to preserve exam score. Please answer questions manually using 'pick opt-X; next'."
+        });
       }
 
       if (t === "multiple_choice") {

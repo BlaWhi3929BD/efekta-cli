@@ -24,6 +24,7 @@ This repository provides **`efekta` v3.0 (Turbo Autonomous Engine)**, an ultra-f
 5. **PROGRESS TEST MANDATE ("Take the final test") — ZERO TRIAL-AND-ERROR:**
    - **TRIAL-AND-ERROR / BRUTE-FORCE (`solve choice`) IS STRICTLY FORBIDDEN ON THE FINAL TEST!**
    - Regular lessons permit retry heuristics. On the Progress Test, every question is an unrepeatable formal assessment; incorrect choices directly degrade the final certificate score below the mandatory 70% threshold.
+   - The engine automatically detects Progress Tests, tags them as `exerciseType: "progress_test_choice"`, and actively blocks `solve choice` and `auto` to safeguard your exam score.
    - Always derive the correct answer using precise grammatical, syntactical, and context-specific linguistic analysis, then submit with `efekta batch "pick opt-X; next" --json -c`.
 
 ---
@@ -37,7 +38,7 @@ Look at `data.agentHint.exerciseType` from your last response and immediately ru
 | `course_overview` / `unknown` (dashboard) | On course page (`/gap/ui/self-study`) | `efekta lesson next --json -c` *(or `efekta auto --json -c`)* | `efekta_lesson(target: "next")` |
 | `passive_screen` / `lesson_overview` | `canProceed: true` or `stage-1..stage-N` | `efekta next --json -c` *(or `efekta auto --json -c`)* | `efekta_next()` / `efekta_autopilot()` |
 | `multiple_choice` (Lesson) | `options: ["opt-1: ...", "opt-2: ..."]` | `efekta batch "solve choice; next" --json -c` | `efekta_solve(strategy: "choice")` |
-| **`multiple_choice` (Progress Test)** | Single-shot exam question | `efekta batch "pick opt-X; next" --json -c` *(Analyze first!)* | `efekta_batch(commands: "pick opt-X; next")` |
+| **`progress_test_choice` (Final Test)** | Graded single-shot exam question | `efekta batch "pick opt-X; next" --json -c` *(Analyze first!)* | `efekta_batch(commands: "pick opt-X; next")` |
 | `matching_pairs` | `slots: ["slot-1: ..."]` + `items: ["item-1: ..."]` | `efekta batch "pair slot-1:item-3, slot-2:item-1; next" --json -c` | `efekta_batch(commands: "pair ...; next")` |
 | `categorize_columns` | 2 category `slots` + N draggable `items` | `efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2; next" --json -c` | `efekta_batch(commands: "sort ...; next")` |
 | `selection_gaps` | `contextText` has `[slot-1]` + drawer | `efekta batch "gaps word1, word2, word3; next" --json -c` | `efekta_batch(commands: "gaps ...; next")` |

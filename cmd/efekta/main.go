@@ -153,31 +153,49 @@ TURBO EXAMPLES:
 func printAgentGuide() {
 	fmt.Println(`# EFEKTA TURBO v3.0 AGENT GUIDE (1-COMMAND-PER-SCREEN PLAYBOOK)
 
-## GOLDEN RULES (MEMORIZE THESE 4 LAWS)
-1. **NEVER call 'status' or 'wait' manually between actions:**
-   Every 'batch', 'next', 'pick', 'pair', 'sort', 'gaps', and 'speak' command automatically waits for animations/locks, auto-opens selection-gap drawers so options are visible immediately, AND returns the fresh page state!
-2. **ALWAYS end exercise batches with '; next':**
-   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" review screens, "How did you find the task?" self-evaluations, AI feedback screens, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
+## 0. THE 5 GOLDEN RULES (MEMORIZE THESE!)
+1. **LET THE PROGRAM DO THE WORK FIRST ('efekta auto'):**
+   'efekta auto --json -c' autonomously navigates passive reading cards, auto-skips pronunciation drills, auto-solves multiple choice, conducts avatar dialogues, and submits essays. It only stops when human knowledge exercises ('gaps', 'sort', 'pair') need an answer!
+2. **ALWAYS end every exercise batch with '; next' (or '; auto'):**
+   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" reviews, self-evaluations, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
 3. **ALWAYS read 'agentHint' first (use '--json -c' for 80% smaller output):**
    'agentHint' gives you 'exerciseType', 'slots', 'items', 'options' (pre-populated even on selection_gaps!), and a ready-to-fill 'actionTemplate'.
-4. **REAL ENGLISH SPEECH ('speak all; next'):**
-   Voice Engine v3 keeps the user's real microphone 100% untouched by default, and when 'speak' is invoked, uses one-shot armed injection with either the page's native reference audio ("Play audio") or English TTS synthesis!
+4. **SKIP MULTI-PHRASE PRONUNCIATION DRILLS IN 1 COMMAND ('efekta skip'):**
+   Whenever a pronunciation drill appears in Stages 1–5, run 'efekta skip --json -c' to skip all phrases in 1 shot and advance.
+5. **PROGRESS TEST MANDATE ("Take the final test") — ZERO TRIAL-AND-ERROR:**
+   - TRIAL-AND-ERROR / BRUTE-FORCE ('solve choice') IS STRICTLY FORBIDDEN ON FORMAL TESTS!
+   - On the Progress Test, every question is an unrepeatable formal assessment; incorrect choices directly degrade the certificate score below the mandatory 70% threshold.
+   - The engine automatically detects Progress Tests and safely blocks brute-force solvers. Always analyze questions grammatically and submit with 'efekta batch "pick opt-X; next" --json -c'.
 
 ---
 
-## INSTANT DECISION MATRIX (SEE TYPE -> RUN 1 COMMAND)
+## 1. INSTANT DECISION MATRIX (SEE TYPE -> RUN 1 COMMAND)
 
-| 'exerciseType' in State | Instant 1-Roundtrip Command |
-| :--- | :--- |
-| 'passive_screen' / 'lesson_overview' | 'efekta next --json -c' |
-| 'multiple_choice' (1 answer) | 'efekta batch "pick opt-2; next" --json -c' (or 'efekta batch "solve choice; next" --json -c') |
-| 'multiple_choice' (multi-select) | 'efekta batch "pick opt-1,opt-3,opt-5; next" --json -c' |
-| 'matching_pairs' | 'efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c' |
-| 'categorize_columns' (sorting) | 'efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c' |
-| 'selection_gaps' / 'fill_in_the_blanks' | 'efekta batch "gaps word1, word2, word3, word4; next" --json -c' |
-| 'order_sentence' | 'efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c' |
-| 'speaking_practice' (pronunciation drill) | 'efekta batch "speak all; next" --json -c' (or 'efekta batch "click skip-1; next" --json -c') |
-| 'speaking_avatar' (AI video roleplay) | 'efekta batch "wait video-end; solve speak; next" --json -c' |`)
+| 'exerciseType' in State | Instant 1-Roundtrip Command | MCP Tool Equivalent |
+| :--- | :--- | :--- |
+| 'course_overview' / dashboard | 'efekta lesson next --json -c' | efekta_lesson(target="next") |
+| 'passive_screen' / 'lesson_overview' | 'efekta next --json -c' (or 'efekta auto --json -c') | efekta_next() / efekta_autopilot() |
+| 'multiple_choice' (regular lesson) | 'efekta batch "solve choice; next" --json -c' | efekta_solve(strategy="choice") |
+| 'progress_test_choice' (Final Test) | 'efekta batch "pick opt-X; next" --json -c' (Analyze first!) | efekta_batch(commands="pick opt-X; next") |
+| 'speaking_practice' (Stages 1–5 drill) | 'efekta skip --json -c' | efekta_solve(strategy="speak") |
+| 'speaking_avatar' (AI video roleplay) | 'efekta batch "dialogue; next" --json -c' | efekta_dialogue() |
+| 'selection_gaps' / 'fill_in_the_blanks' | 'efekta batch "gaps word1, word2, word3; next" --json -c' | efekta_batch(commands="gaps ...; next") |
+| 'writing_essay' (80–120+ words) | 'efekta batch "essay; next" --json -c' | efekta_essay(text="auto") |
+| 'matching_pairs' | 'efekta batch "pair slot-1:item-3, slot-2:item-1; next" --json -c' | efekta_batch(commands="pair ...; next") |
+| 'categorize_columns' (sorting) | 'efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2; next" --json -c' | efekta_batch(commands="sort ...; next") |
+| 'order_sentence' (tap sequence) | 'efekta batch "sequence auto; next" --json -c' | efekta_sequence(tokens="auto") |
+| 'order_sentence' (token picker) | 'efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c' | efekta_batch(commands="pick ...; next") |
+| 'order_dialogue' (cdk-drag reordering) | 'efekta batch "drag item-2 item-1; next" --json -c' | efekta_batch(commands="drag ...; next") |
+
+---
+
+## 2. AUTONOMOUS LESSON NAVIGATION
+  efekta lesson next --json -c       # Automatically find & start next incomplete lesson
+  efekta lesson list --json -c       # View structured units, lessons & progress summary
+  efekta lesson U3L1 --json -c       # Jump directly to Unit 3 Lesson 1
+  efekta lesson TEST --json -c       # Jump directly to Final Progress Test
+  efekta lesson resume --json -c     # Continue current in-progress lesson
+  efekta lesson close --json -c      # Exit active lesson back to course overview`)
 }
 
 func stripFlags(args []string) []string {
@@ -675,7 +693,11 @@ func printStateHuman(resp *protocol.Response) {
 	_ = json.Unmarshal(stateBytes, &state)
 
 	fmt.Println("==================================================")
-	fmt.Printf("Exercise Type : %s\n", strings.ToUpper(state.ExerciseType))
+	if state.IsProgressTest {
+		fmt.Printf("Exercise Type : %s [PROGRESS TEST - ZERO ERROR MANDATE]\n", strings.ToUpper(state.ExerciseType))
+	} else {
+		fmt.Printf("Exercise Type : %s\n", strings.ToUpper(state.ExerciseType))
+	}
 	if state.AgentHint != nil && state.AgentHint.ActionTemplate != "" {
 		fmt.Printf("Turbo Command : %s\n", state.AgentHint.ActionTemplate)
 	}
