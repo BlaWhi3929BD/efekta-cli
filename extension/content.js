@@ -2041,10 +2041,33 @@
     }
     await dismissOverlaysIfPresent();
 
-    const entries = String(specStr)
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+    let entries = [];
+    const raw = String(specStr || "").trim();
+    if (raw.includes("|")) {
+      entries = raw.split("|").map((s) => s.trim()).filter(Boolean);
+    } else {
+      let current = "";
+      let inQuote = false;
+      let quoteChar = "";
+      for (let i = 0; i < raw.length; i++) {
+        const c = raw[i];
+        if ((c === '"' || c === "'") && (i === 0 || raw[i - 1] !== "\\")) {
+          if (!inQuote) {
+            inQuote = true;
+            quoteChar = c;
+          } else if (c === quoteChar) {
+            inQuote = false;
+          }
+          current += c;
+        } else if (c === "," && !inQuote) {
+          if (current.trim()) entries.push(current.trim());
+          current = "";
+        } else {
+          current += c;
+        }
+      }
+      if (current.trim()) entries.push(current.trim());
+    }
 
     const filled = [];
     const docs = getAllDocs();
@@ -2790,6 +2813,10 @@
       while (Date.now() - recStart < recordWaitMs) {
         await sleep(150);
         const vStat = await callVoiceBridge({ type: "status" });
+        if (Date.now() - recStart > 1200 && (!vStat || !vStat.session)) {
+          log.push("Recording session did not start, aborting wait");
+          break;
+        }
         if (vStat && vStat.session && vStat.session.stoppedByPage) {
           stoppedAutomatically = true;
           break;
@@ -3050,9 +3077,89 @@
     }
 
     const finalState = inspectState();
+    if (finalState.canProceed) {
+      return { success: true, message: "Completed options and unlocked progression", nextButtonId: finalState.nextButtonId, clicked };
+    }
+
+    // Phase 2: Autonomous Multi-Select Solver (for checkboxes needing 2-4 simultaneous selections)
+    const isMultiChoice = candidates.some((c) => {
+      const el = c.domEl || resolveElement(c.meta.id);
+      return el && (el.getAttribute("role") === "checkbox" || el.querySelector("input[type=checkbox]"));
+    });
+    if (isMultiChoice) {
+      // 1. Deselect any currently selected options
+      for (const { meta, domEl, text } of candidates) {
+        const el = domEl || resolveElement(meta.id) || findInteractiveByText(text);
+        if (el && (el.classList.contains("is-selected") || el.getAttribute("aria-checked") === "true")) {
+          await simulateClick(el);
+          await sleep(50);
+        }
+      }
+
+      function getCombos(n, k) {
+        const result = [];
+        function backtrack(start, combo) {
+          if (combo.length === k) {
+            result.push([...combo]);
+            return;
+          }
+          for (let i = start; i < n; i++) {
+            combo.push(i);
+            backtrack(i + 1, combo);
+            combo.pop();
+          }
+        }
+        backtrack(0, []);
+        return result;
+      }
+
+      const candEls = candidates.map((c) => c.domEl || resolveElement(c.meta.id) || findInteractiveByText(c.text));
+      for (const k of [2, 3, 4]) {
+        if (k > candEls.length) break;
+        const combos = getCombos(candEls.length, k);
+        for (const combo of combos) {
+          for (const idx of combo) {
+            if (candEls[idx]) await simulateClick(candEls[idx]);
+            await sleep(40);
+          }
+          const stAfter = inspectState();
+          if (stAfter.canProceed && !stAfter.feedback.startsWith("incorrect")) {
+            return {
+              success: true,
+              message: `Unlocked multi-select progression with combo [${combo.map(i => candidates[i].text).join(", ")}]`,
+              nextButtonId: stAfter.nextButtonId,
+              clicked
+            };
+          }
+          const chk = stAfter.elements.find((e) => e.type === "next_btn" && !e.disabled && /\b(check|submit|проверить)\b/i.test(e.text));
+          if (chk) {
+            const chkEl = resolveElement(chk.id);
+            if (chkEl) {
+              await simulateClick(chkEl);
+              await sleep(60);
+              const postChk = inspectState();
+              if (postChk.canProceed && !postChk.feedback.startsWith("incorrect")) {
+                return {
+                  success: true,
+                  message: `Unlocked multi-select progression with combo [${combo.map(i => candidates[i].text).join(", ")}]`,
+                  nextButtonId: postChk.nextButtonId,
+                  clicked
+                };
+              }
+            }
+          }
+          for (const idx of combo) {
+            if (candEls[idx]) await simulateClick(candEls[idx]);
+            await sleep(40);
+          }
+        }
+      }
+    }
+
+    const postState = inspectState();
     return {
-      success: finalState.canProceed,
-      message: finalState.canProceed
+      success: postState.canProceed,
+      message: postState.canProceed
         ? "Completed options and unlocked progression"
         : "Tested choice options; inspect state for multi-select",
       clicked
@@ -3406,7 +3513,8 @@
 
       // 2. If no response options are visible yet, wait briefly for turn to load
       if (opts.length === 0) {
-        await sleep(250);
+        await sleep(350);
+        guard = Math.max(0, guard - 1); // Do not consume turn attempt guard while waiting for avatar video/turn to render
         continue;
       }
 
@@ -3435,12 +3543,15 @@
       const hasMic = st.elements.some((e) => e.type === "mic_btn");
       let res = null;
       if (hasMic) {
-        // Wait up to 3s if mic button is currently disabled while avatar finishes talking
-        const micStart = Date.now();
-        while (Date.now() - micStart < 3000) {
-          const micEl = (inspectState().elements || []).find((e) => e.type === "mic_btn");
-          if (micEl && !micEl.disabled) break;
-          await sleep(150);
+        // Wait up to 35s for avatar video to finish speaking this turn and unlock mic
+        const mediaWaitStart = Date.now();
+        while (Date.now() - mediaWaitStart < 35000) {
+          const m = getMediaStatus();
+          const micMeta = (inspectState().elements || []).find((e) => e.type === "mic_btn");
+          if ((!m.isPlaying || m.paused || m.ended) && (!micMeta || !micMeta.disabled)) {
+            break;
+          }
+          await sleep(250);
         }
         res = await speakSinglePhrase(choice.id);
         const after = inspectState();
@@ -3617,7 +3728,7 @@
     let targetTokens = [];
     const raw = String(spec || "").trim();
     if (raw && raw.toLowerCase() !== "auto") {
-      if (raw.includes(",")) {
+      if (raw.includes(",") && !raw.includes(" ")) {
         targetTokens = raw.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
       } else {
         targetTokens = raw.split(/\s+/).filter(Boolean);
@@ -3631,14 +3742,15 @@
       targetTokens = [...firstCandidates, ...middleWords, ...lastCandidates].map((it) => it.text);
     }
 
+    const norm = (s) => String(s || "").replace(/\\/g, "").replace(/['’`"]/g, "'").trim().toLowerCase();
     const clicked = [];
     for (const token of targetTokens) {
       await waitUntilUnlocked(600);
       const poolButtons = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
-      const cleanTarget = token.toLowerCase();
+      const cleanTarget = norm(token);
       const matchBtn =
-        poolButtons.find((b) => cleanText(b).toLowerCase() === cleanTarget) ||
-        poolButtons.find((b) => cleanText(b).toLowerCase().includes(cleanTarget)) ||
+        poolButtons.find((b) => norm(cleanText(b)) === cleanTarget) ||
+        poolButtons.find((b) => norm(cleanText(b)).includes(cleanTarget)) ||
         poolButtons.find((b) => b.getAttribute("data-efekta-id") === token);
 
       if (matchBtn) {
@@ -3785,7 +3897,23 @@
       }
 
       if (t === "unknown" && !st.canProceed) {
-        if (window.location.pathname.includes("/self-study")) {
+        const isInLessonPlayer =
+          window.location.host.includes("lesson-player") ||
+          window.location.pathname.includes("/lesson-view") ||
+          getAllDocs().some((d) =>
+            d.querySelector("ef-lesson-player, ef-activity, .lesson-header, button.next-task-button, .close-button")
+          );
+
+        if (isInLessonPlayer) {
+          const n = await executeAutoNext(9);
+          if (n.hops > 0 || n.success) {
+            steps.push(`next: ${n.message}`);
+            (n.autoReadNotes || []).forEach((x) => notes.push(x));
+            continue;
+          }
+        }
+
+        if (window.location.pathname.includes("/self-study") || window.location.pathname.includes("/home")) {
           const lRes = await executeLesson("next");
           if (lRes.success) {
             steps.push(`lesson: ${lRes.message}`);
