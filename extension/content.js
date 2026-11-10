@@ -1529,9 +1529,20 @@
       actionTemplate = `efekta batch "gaps word1, word2, word3; next" --json -c`;
       summary = `Fill ${slotEls.length} gap buttons in order using 'gaps word1, word2...; next'.`;
     } else if (inputEls.length > 0) {
-      exerciseType = "fill_in_the_blanks";
-      actionTemplate = `efekta batch "gaps word1, word2; next" --json -c`;
-      summary = `Type ${inputEls.length} blanks in order using 'gaps word1, word2; next'.`;
+      const hasTextarea = getAllDocs().some(
+        (d) =>
+          d.querySelector("textarea, .word-counter") ||
+          /write\s*\d+\+?\s*words/i.test(d.body?.innerText || "")
+      );
+      if (hasTextarea) {
+        exerciseType = "writing_essay";
+        actionTemplate = `efekta batch "essay; next" --json -c`;
+        summary = `Writing/essay task (requires 80+ words). Run 'efekta batch "essay; next" --json -c' to auto-write a fluent formal email/essay and advance.`;
+      } else {
+        exerciseType = "fill_in_the_blanks";
+        actionTemplate = `efekta batch "gaps word1, word2; next" --json -c`;
+        summary = `Type ${inputEls.length} blanks in order using 'gaps word1, word2; next'.`;
+      }
     } else if (dragEls.length > 0 && slotEls.length > 1) {
       exerciseType = "categorize_columns";
       actionTemplate = `efekta batch "sort slot-1:item-1,item-2; sort slot-2:item-3,item-4; next" --json -c`;
@@ -1548,15 +1559,26 @@
         summary = `Tap-to-match: ${dragEls.length} cards. Pair each image card with its word card using 'pair item-A:item-B, ...; next'.`;
       }
     } else if (dragEls.length > 0) {
-      const hasSequencing = getAllDocs().some((d) => d.querySelector("ef-sequencing-task, [class*='sequencing']"));
-      if (hasSequencing) {
-        exerciseType = "order_dialogue";
-        actionTemplate = `efekta batch "drag item-1 item-2; next" --json -c`;
-        summary = `Dialogue/sequence reordering task (${dragEls.length} items). Drag items into the correct order, ending with '; next'.`;
-      } else {
+      const isTapSequencing = getAllDocs().some((d) =>
+        d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+      );
+      if (isTapSequencing) {
         exerciseType = "order_sentence";
-        actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json -c`;
-        summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
+        actionTemplate = `efekta batch "sequence auto; next" --json -c`;
+        summary = `Tap-ordering task (${dragEls.length} tokens). Tap tokens into sentence order using 'sequence "<sentence>"; next' or 'sequence auto; next'.`;
+      } else {
+        const hasSequencing = getAllDocs().some((d) =>
+          d.querySelector("ef-sequencing-task, [class*='sequencing']")
+        );
+        if (hasSequencing) {
+          exerciseType = "order_dialogue";
+          actionTemplate = `efekta batch "drag item-1 item-2; next" --json -c`;
+          summary = `Dialogue/sequence reordering task (${dragEls.length} items). Drag items into the correct order, ending with '; next'.`;
+        } else {
+          exerciseType = "order_sentence";
+          actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json -c`;
+          summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
+        }
       }
     } else if (choiceEls.length >= 2) {
       exerciseType = "multiple_choice";
@@ -2012,9 +2034,7 @@
           drawerOpts.length > 0 &&
           ((gapBtn.className || "").toLowerCase().includes("selected") ||
             (gapBtn.className || "").toLowerCase().includes("active") ||
-            gapBtn.getAttribute("aria-expanded") === "true" ||
-            (i === 0 && !targetKey) ||
-            (i === 0 && targetKey === "slot-1"));
+            gapBtn.getAttribute("aria-expanded") === "true");
 
         if (!isGapAlreadySelected && gapBtn) {
           await simulateClick(gapBtn);
@@ -2099,6 +2119,7 @@
       t === "categorize_columns" ||
       t === "selection_gaps" ||
       t === "fill_in_the_blanks" ||
+      t === "writing_essay" ||
       t === "order_sentence" ||
       t === "multiple_choice" ||
       t === "speaking_practice" ||
@@ -2145,7 +2166,7 @@
     for (let step = 0; step < maxHops; step++) {
       await dismissOverlaysIfPresent();
       await waitUntilUnlocked(1500);
-      const st = inspectState();
+      let st = inspectState();
 
       // Avatar dialogue: NEVER fast-forward (seeking its video skips every question). Hand over to `dialogue`.
       if (isAvatarContext(st) && !isSummaryVisible() && !(step === 0 && st.canProceed && st.exerciseType !== "speaking_avatar")) {
@@ -2243,6 +2264,22 @@
             break;
           }
         }
+      }
+
+      // Priority 1: Auto-unlock reading/presentation cards by scrolling .task-area / [cdkscrollable] to bottom
+      if (!st.canProceed && st.elements.some((e) => e.type === "next_btn" && e.disabled)) {
+        const docs = getAllDocs();
+        for (const doc of docs) {
+          const scrollables = doc.querySelectorAll(".task-area, [cdkscrollable], .tasks-scroll-internal");
+          for (const el of scrollables) {
+            if (el.scrollHeight > el.clientHeight + 10) {
+              el.scrollTop = el.scrollHeight;
+              el.dispatchEvent(new Event("scroll", { bubbles: true }));
+            }
+          }
+        }
+        await sleep(150);
+        st = inspectState();
       }
 
       // Priority 1: Active Next / Start next step / Continue / Back to lesson overview button
@@ -2542,17 +2579,30 @@
         log.push(`Prepared English TTS audio (${dec.durationMs}ms)`);
       }
 
-      // Wait up to 3.5s for mic button to be enabled (not disabled while reference audio finishes)
+      // Wait up to 4.5s for mic button to be present and enabled
       let micEl = null;
       const micWaitStart = Date.now();
-      while (Date.now() - micWaitStart < 3500) {
+      while (Date.now() - micWaitStart < 4500) {
         const curSt = inspectState();
         const micMeta = curSt.elements.find((e) => e.type === "mic_btn" && !e.disabled);
         if (micMeta) {
-          micEl = resolveElement(micMeta.id);
-          if (micEl) break;
+          const el = resolveElement(micMeta.id);
+          if (el) {
+            micEl = el;
+            break;
+          }
         }
-        await sleep(120);
+        await sleep(140);
+      }
+      if (!micEl) {
+        // Fallback: resolve whatever mic button is currently in DOM
+        for (const doc of docs) {
+          const btn = doc.querySelector("button.audio-recorder-btn, [data-qa='audio-record-or-play']");
+          if (btn && isVisible(btn)) {
+            micEl = btn;
+            break;
+          }
+        }
       }
 
       if (!micEl) {
@@ -2561,6 +2611,14 @@
           error: "Microphone button (mic-1) not found or disabled",
           log
         };
+      }
+
+      // If mic button is in replay / "Not quite right, please try again" state, click once to reset back to ready
+      const initialAria = (micEl.getAttribute("aria-label") || "").toLowerCase();
+      if (initialAria.includes("try again") || micEl.querySelector("ef-svg-replay")) {
+        log.push("Resetting mic button from replay state...");
+        await simulateClick(micEl);
+        await sleep(250);
       }
 
       const clipDurMs = Math.max(1200, Number(preparedClip.durationMs) || 2200);
@@ -3103,7 +3161,15 @@
     for (const line of raw) {
       const m = String(line).match(/^(opt-\d+):\s*(?:([A-Za-z])[:.)]\s*)?(.*)$/);
       if (m) {
-        out.push({ id: m[1], letter: (m[2] || "").toUpperCase(), text: (m[3] || line).trim() });
+        const id = m[1];
+        const elMeta = (st.elements || []).find((e) => e.id === id);
+        const isIncorrect = elMeta && (elMeta.className || "").includes("incorrect");
+        out.push({
+          id,
+          letter: (m[2] || "").toUpperCase(),
+          text: (m[3] || line).trim(),
+          incorrect: !!isIncorrect
+        });
       }
     }
     return out;
@@ -3163,10 +3229,23 @@
           await sleep(800);
           continue; // skipped questions come back one by one
         }
+        if (sum.nextBtn) {
+          await simulateClick(sum.nextBtn);
+          await sleep(500);
+        } else {
+          for (const doc of getAllDocs()) {
+            const nb = doc.querySelector("button.next-task-button, button.close-button");
+            if (nb && isVisible(nb)) {
+              await simulateClick(nb);
+              await sleep(400);
+              break;
+            }
+          }
+        }
         return {
           success: sum.passed || !sum.notPassed,
           finished: true,
-          message: `Dialogue finished: ${sum.correct}/${sum.total} correct, ${sum.passed ? "PASSED" : sum.notPassed ? "NOT passed" : "done"}. Run 'next' to continue.`,
+          message: `Dialogue finished: ${sum.correct}/${sum.total} correct, ${sum.passed ? "PASSED" : sum.notPassed ? "NOT passed" : "done"}.`,
           turns,
           summary: sum.text
         };
@@ -3204,9 +3283,11 @@
           null;
       }
       let how = "pick";
-      if (!choice) {
+      const availableOpts = opts.filter((o) => !o.incorrect);
+      const pool = availableOpts.length > 0 ? availableOpts : opts;
+      if (!choice || (choice.incorrect && availableOpts.length > 0)) {
         how = "heuristic";
-        choice = opts
+        choice = pool
           .map((o) => ({ o, s: scoreDialogueOption(o.text, scenario) }))
           .sort((a, b) => b.s - a.s)[0].o;
       }
@@ -3215,30 +3296,41 @@
       let res = null;
       if (hasMic) {
         res = await speakSinglePhrase(choice.id);
+        const after = inspectState();
+        if (!(res.success || after.canProceed)) {
+          if (++retries > 2) {
+            const skipBtn = findSkipButtonEl();
+            if (skipBtn) {
+              await simulateClick(skipBtn);
+              await sleep(600);
+              retries = 0;
+              continue;
+            }
+            return {
+              success: false,
+              message: `Dialogue stopped: speech was not accepted after retries (${res.error || res.message || "unknown"}). Try 'speak ${choice.id}' manually.`,
+              turns
+            };
+          }
+          continue;
+        }
+        retries = 0;
+        turns.push({ turn: turns.length + 1, option: `${choice.id} ${choice.letter}`.trim(), text: choice.text, how });
       } else {
-        const choiceEl = resolveElement(choice.id) || findInteractiveByText(choice.text);
-        if (choiceEl) {
-          await simulateClick(choiceEl);
-          await sleep(140);
-          res = { success: true, message: `Tapped choice: ${choice.text}` };
-        } else {
-          res = await solveMultipleChoice(80);
+        // Tap turn (multiple-choice): solve using smart choice solver with instant abort on wrong options!
+        res = await solveMultipleChoice(80);
+        if (!res.success) {
+          const choiceEl = resolveElement(choice.id) || findInteractiveByText(choice.text);
+          if (choiceEl) {
+            await simulateClick(choiceEl);
+            await sleep(140);
+          }
         }
+        turns.push({ turn: turns.length + 1, option: choice.id, text: res.message || choice.text, how: "solve_choice" });
       }
-      const after = inspectState();
-      if (!(res.success || after.canProceed)) {
-        if (++retries > 2) {
-          return {
-            success: false,
-            message: `Dialogue stopped: speech was not accepted after retries (${res.error || res.message || "unknown"}). Try 'speak ${choice.id}' manually.`,
-            turns
-          };
-        }
-        continue;
-      }
-      retries = 0;
-      turns.push({ turn: turns.length + 1, option: `${choice.id} ${choice.letter}`.trim(), text: choice.text, how });
 
+      await sleep(150);
+      const after = inspectState();
       if (after.canProceed && after.nextButtonId) {
         const b = resolveElement(after.nextButtonId);
         if (b) await simulateClick(b);
@@ -3246,9 +3338,180 @@
       if (once) {
         return { success: true, message: `Answered turn ${turns.length}: "${choice.text}"`, turns };
       }
-      await sleep(350);
+      await sleep(450);
     }
     return { success: false, message: "Dialogue timed out", turns };
+  }
+
+  // `essay [text]` - automatically composes and submits a fluent formal B2 email or essay, passes self-evaluation, and advances!
+  async function executeEssay(customText = "") {
+    const docs = getAllDocs();
+    let textarea = null;
+    for (const doc of docs) {
+      textarea = doc.querySelector("textarea");
+      if (textarea && isVisible(textarea)) break;
+    }
+    if (!textarea) {
+      return { success: false, error: "No textarea found for essay writing task" };
+    }
+
+    let essayText = String(customText || "").trim();
+    if (!essayText || essayText.toLowerCase() === "auto") {
+      const bullets = [];
+      let stimulusPrompt = "";
+      for (const doc of docs) {
+        doc.querySelectorAll("ef-stimulus li, .task-area li, p").forEach((li) => {
+          const t = cleanText(li);
+          if (t && !bullets.includes(t) && t.length > 5 && !t.includes("Instructions")) bullets.push(t);
+        });
+        const p = doc.querySelector("ef-stimulus p, .task-area p");
+        if (p) stimulusPrompt = cleanText(p);
+      }
+
+      const isEmail = /email|boss|colleague|client|manager|write to|meeting/i.test(stimulusPrompt + " " + bullets.join(" "));
+      if (isEmail) {
+        const bodySentences = [];
+        if (bullets.length > 0) {
+          bullets.slice(0, 4).forEach((b, idx) => {
+            const cleanB = b.replace(/^[•\-\d.)\s]+/, "").trim();
+            if (idx === 0) {
+              bodySentences.push(`First of all, I was wondering regarding ${cleanB.replace(/[?.]+$/, "")}, as it would help us finalize our schedule.`);
+            } else if (idx === 1) {
+              bodySentences.push(`In addition, would it be advisable to consider ${cleanB.replace(/[?.]+$/, "")} so that we can ensure complete coordination?`);
+            } else {
+              bodySentences.push(`Finally, could you please clarify ${cleanB.replace(/[?.]+$/, "")} at your earliest convenience?`);
+            }
+          });
+        } else {
+          bodySentences.push("First of all, I would like to inquire about our project timeline and upcoming milestones.");
+          bodySentences.push("Furthermore, it would be advisable to review our strategic resources so that our team can achieve optimal efficiency.");
+          bodySentences.push("Finally, I would appreciate your guidance on the primary objectives we should prioritize over the next quarter.");
+        }
+
+        essayText = [
+          "Dear Ms. Ross,",
+          "",
+          "I hope this message finds you well. I am writing to provide an update and inquire about several important matters.",
+          "",
+          bodySentences.join(" "),
+          "Doing so will allow us sufficient time to incorporate all key insights into our overall plan and resolve any outstanding issues.",
+          "",
+          "Thank you very much for your time, support, and guidance. I look forward to hearing your thoughts soon.",
+          "",
+          "Sincerely,",
+          "Chris Smith"
+        ].join("\n");
+      } else {
+        essayText = [
+          "In modern professional environments, effective communication and strategic planning are essential components of sustainable success.",
+          "To begin with, addressing critical organizational challenges requires careful investigation and coordinated collaboration across all departments.",
+          "Furthermore, taking sufficient time to evaluate innovative solutions ensures that high standards of quality and efficiency are consistently maintained.",
+          "In conclusion, adopting a structured and proactive approach enables teams to achieve their objectives and deliver lasting value for the organization."
+        ].join("\n\n");
+      }
+    }
+
+    await simulateType(textarea, essayText);
+    await sleep(350);
+
+    const stAfter = inspectState();
+    if (stAfter.canProceed && stAfter.nextButtonId) {
+      const btn = resolveElement(stAfter.nextButtonId);
+      if (btn) await simulateClick(btn);
+    } else {
+      for (const doc of docs) {
+        const btn = doc.querySelector("button.next-task-button, button.check-task-button");
+        if (btn && isVisible(btn) && !btn.disabled) {
+          await simulateClick(btn);
+          break;
+        }
+      }
+    }
+    await sleep(400);
+
+    const postNext = await executeAutoNext(5);
+    const wordCount = essayText.split(/\s+/).filter(Boolean).length;
+    return {
+      success: true,
+      message: `Completed and submitted essay (${wordCount} words) and advanced through self-evaluation`,
+      wordCount,
+      autoReadNotes: postNext.autoReadNotes
+    };
+  }
+
+  // `sequence [tokens|auto]` - automatically sequences tap-option tokens in ef-sequencing-tap-option-task
+  async function executeSequence(spec = "") {
+    const docs = getAllDocs();
+    let orderedList = null;
+    let unorderedList = null;
+    for (const doc of docs) {
+      const container = doc.querySelector("ef-sequencing-tap-option-task, [class*='sequencing']");
+      if (container) {
+        orderedList = container.querySelector(".ordered-item-container, ol");
+        unorderedList = container.querySelector(".unordered-item-container, ul");
+        break;
+      }
+    }
+
+    if (!orderedList || !unorderedList) {
+      return { success: false, error: "No sequencing tap container found (requires ordered/unordered item lists)" };
+    }
+
+    const orderedButtons = Array.from(orderedList.querySelectorAll("button.item, button")).filter(isVisible);
+    for (let i = orderedButtons.length - 1; i >= 0; i--) {
+      await simulateClick(orderedButtons[i]);
+      await sleep(45);
+    }
+    await sleep(80);
+
+    let targetTokens = [];
+    const raw = String(spec || "").trim();
+    if (raw && raw.toLowerCase() !== "auto") {
+      if (raw.includes(",")) {
+        targetTokens = raw.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+      } else {
+        targetTokens = raw.split(/\s+/).filter(Boolean);
+      }
+    } else {
+      const poolButtons = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
+      const items = poolButtons.map((b) => ({ text: cleanText(b), el: b }));
+      const firstCandidates = items.filter((it) => /^[A-Z]/.test(it.text) && !/[.?!…]$/.test(it.text));
+      const lastCandidates = items.filter((it) => /[.?!…]+["'”’)]*$/.test(it.text));
+      const middleWords = items.filter((it) => !firstCandidates.includes(it) && !lastCandidates.includes(it));
+      targetTokens = [...firstCandidates, ...middleWords, ...lastCandidates].map((it) => it.text);
+    }
+
+    const clicked = [];
+    for (const token of targetTokens) {
+      await waitUntilUnlocked(600);
+      const poolButtons = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
+      const cleanTarget = token.toLowerCase();
+      const matchBtn =
+        poolButtons.find((b) => cleanText(b).toLowerCase() === cleanTarget) ||
+        poolButtons.find((b) => cleanText(b).toLowerCase().includes(cleanTarget)) ||
+        poolButtons.find((b) => b.getAttribute("data-efekta-id") === token);
+
+      if (matchBtn) {
+        await simulateClick(matchBtn);
+        clicked.push(cleanText(matchBtn));
+        await sleep(65);
+      }
+    }
+
+    await sleep(100);
+    for (const doc of docs) {
+      const checkBtn = doc.querySelector("button.check-task-button, button.next-task-button");
+      if (checkBtn && isVisible(checkBtn) && !checkBtn.disabled) {
+        await simulateClick(checkBtn);
+        break;
+      }
+    }
+
+    return {
+      success: clicked.length > 0,
+      message: `Sequenced ${clicked.length} tokens: ${clicked.join(" ")}`,
+      clicked
+    };
   }
 
   // `autopilot [maxSteps] [speak]` - drives EVERYTHING that needs no answer knowledge:
@@ -3317,6 +3580,49 @@
           const n = await executeAutoNext(9);
           (n.autoReadNotes || []).forEach((x) => notes.push(x));
           continue;
+        }
+      }
+
+      if (t === "writing_essay") {
+        const r = await executeEssay("auto");
+        steps.push(`essay: ${r.message}`);
+        if (r.success) {
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (t === "order_sentence") {
+        const isTapSeq = getAllDocs().some((d) =>
+          d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+        );
+        if (isTapSeq) {
+          const r = await executeSequence("auto");
+          if (r.success) {
+            steps.push(`sequenced: ${r.message}`);
+            const n = await executeAutoNext(9);
+            (n.autoReadNotes || []).forEach((x) => notes.push(x));
+            continue;
+          }
+        }
+      }
+
+      if (t === "matching_pairs") {
+        const dragEls = (st.elements || []).filter((e) => e.type === "item");
+        const slotEls = (st.elements || []).filter((e) => e.type === "slot");
+        if (slotEls.length === 0 && dragEls.length >= 4) {
+          const sug = suggestImageWordPairs(dragEls);
+          if (sug && sug.confident) {
+            const pairSpec = sug.pairs.map((p) => `${p.img}:${p.word}`).join(", ");
+            const r = await executePair(pairSpec);
+            if (r.success) {
+              steps.push(`matched pairs: ${r.message}`);
+              const n = await executeAutoNext(9);
+              (n.autoReadNotes || []).forEach((x) => notes.push(x));
+              continue;
+            }
+          }
         }
       }
 
@@ -3445,7 +3751,17 @@
       }
       case "scroll": {
         const dy = cmd.amount || (cmd.direction === "up" ? -400 : 400);
-        window.scrollBy({ top: dy, behavior: "smooth" });
+        const docs = getAllDocs();
+        for (const doc of docs) {
+          const scrollables = doc.querySelectorAll(".task-area, [cdkscrollable], .tasks-scroll-internal");
+          for (const el of scrollables) {
+            if (el.scrollHeight > el.clientHeight) {
+              el.scrollTop += dy;
+              el.dispatchEvent(new Event("scroll", { bubbles: true }));
+            }
+          }
+        }
+        window.scrollBy({ top: dy, behavior: "instant" });
         return { success: true, message: `Scrolled ${dy}px` };
       }
       case "wait":
@@ -3458,8 +3774,21 @@
         return { success: res.success, message: res.message, data: res };
       }
       case "solve_sentence": {
+        const isTapSeq = getAllDocs().some((d) =>
+          d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+        );
+        if (isTapSeq) {
+          return await executeSequence(cmd.target || cmd.text || "auto");
+        }
         const res = await solveSentenceHeuristic();
         return { success: res.success, message: res.message, data: res };
+      }
+      case "essay":
+      case "write": {
+        return await executeEssay(cmd.target || cmd.text || "");
+      }
+      case "sequence": {
+        return await executeSequence(cmd.target || cmd.text || "");
       }
       case "skip_speaking": {
         const res = await solveSpeakingTask();
@@ -3593,9 +3922,12 @@
           if (autoReadNotes.length > 0) {
             finalState.autoReadNotes = autoReadNotes;
           }
+          const allOk = results.every((r) => r.success);
+          const firstErr = results.find((r) => !r.success);
           sendResponse({
-            success: results.every((r) => r.success),
+            success: allOk,
             message: `Executed ${results.length} batch commands`,
+            error: allOk ? undefined : (firstErr?.error || firstErr?.message || "Batch command failed"),
             results,
             data: finalState
           });

@@ -312,6 +312,34 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 		{
+			"name":        "efekta_essay",
+			"description": "Auto-write or submit an 80+ word formal email or essay, submit it into textarea, and auto-advance through the self-evaluation screen.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"text": map[string]interface{}{
+						"type":        "string",
+						"description": "Custom essay text or 'auto' (default) to auto-generate a fluent B2 formal email addressing all prompt bullet points",
+					},
+					"compact": map[string]interface{}{"type": "boolean", "description": "Strip coordinate dump (default: true)"},
+				},
+			},
+		},
+		{
+			"name":        "efekta_sequence",
+			"description": "Auto-order tokens in a tap-sequencing task (ef-sequencing-tap-option-task). Resets canvas if needed, clicks pool tokens in sequence, and checks.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"tokens": map[string]interface{}{
+						"type":        "string",
+						"description": "Target sentence, comma-separated tokens, or 'auto' (default) to sequence with capitalization & punctuation heuristics",
+					},
+					"compact": map[string]interface{}{"type": "boolean", "description": "Strip coordinate dump (default: true)"},
+				},
+			},
+		},
+		{
 			"name":        "efekta_batch",
 			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'speak all', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
 			"inputSchema": map[string]interface{}{
@@ -414,6 +442,18 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 	case "efekta_batch":
 		subCmds := protocol.ParseBatchString(strArg("commands"))
 		cmd = protocol.Command{Action: "batch", Commands: subCmds}
+	case "efekta_essay":
+		txt := strArg("text")
+		if txt == "" {
+			txt = "auto"
+		}
+		cmd = protocol.Command{Action: "essay", Target: txt}
+	case "efekta_sequence":
+		tokens := strArg("tokens")
+		if tokens == "" {
+			tokens = "auto"
+		}
+		cmd = protocol.Command{Action: "sequence", Target: tokens}
 	case "efekta_solve":
 		strat := strArg("strategy")
 		switch strat {

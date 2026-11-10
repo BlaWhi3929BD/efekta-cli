@@ -413,6 +413,17 @@
   const recorders = [];
   const allCreatedCtxs = new Set();
 
+  function newOutput(sampleRate) {
+    const ctx = sampleRate ? new OrigAudioContext({ sampleRate }) : new OrigAudioContext();
+    allCreatedCtxs.add(ctx);
+    const dest = ctx.createMediaStreamDestination();
+    try {
+      const p = ctx.resume();
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) {}
+    return { ctx, dest, stream: dest.stream };
+  }
+
   function isArmed() {
     if (armed && Date.now() > armed.expiresAt) {
       note("arm-expired", { id: armed.id });
@@ -433,18 +444,8 @@
   window.addEventListener("mousedown", resumeAllContexts, true);
   window.addEventListener("click", resumeAllContexts, true);
 
-  function newOutput(sampleRate) {
-    const ctx = sampleRate ? new OrigAudioContext({ sampleRate }) : new OrigAudioContext();
-    allCreatedCtxs.add(ctx);
-    const dest = ctx.createMediaStreamDestination();
-    try {
-      const p = ctx.resume();
-      if (p && p.catch) p.catch(() => {});
-    } catch (_) {}
-    return { ctx, dest, stream: dest.stream };
-  }
-
   function consume(via, sampleRate) {
+    if (!armed) return session;
     const a = armed;
     armed = null;
     const out = newOutput(sampleRate);
@@ -472,18 +473,6 @@
       realHold: null
     };
     ownStreams.add(out.stream);
-    out.stream.getAudioTracks().forEach((track) => {
-      const origStop = track.stop.bind(track);
-      track.stop = function () {
-        if (s.playEndedAt && !s.stoppedByPage) {
-          s.stoppedByPage = true;
-          s.stoppedAt = Date.now();
-          note("inj-track-stopped", { id: s.id });
-          setTimeout(() => cleanupSession(s), 60);
-        }
-        return origStop();
-      };
-    });
     session = s;
     note("inj-consumed", {
       id: s.id,
@@ -491,9 +480,8 @@
       source: s.source,
       rate: out.ctx.sampleRate
     });
-    // Ensure context is running and start audio
     ensureRunning(s).then(() => startPlayback(s, "auto"));
-    setTimeout(() => cleanupSession(s), 30000);
+    setTimeout(() => cleanupSession(s), durMs + leadMs + 20000);
     return s;
   }
 
@@ -519,41 +507,39 @@
     const leadMs = Math.max(0, Number(s.leadMs) || 150);
     s.playEndsAt = s.playStartedAt + leadMs + durMs;
 
-    let pending = s.outputs.length;
+    let pending = 0;
+    const onDone = () => {
+      pending--;
+      if (pending <= 0 && !s.playEndedAt) {
+        s.playEndedAt = Date.now();
+        note("inj-play-ended", { id: s.id, via: "all" });
+      }
+    };
+
     for (const o of s.outputs) {
       try {
-        if (o.ctx.state === "suspended") {
-          o.ctx.resume().catch(() => {});
-        }
+        if (o.ctx.state === "suspended") o.ctx.resume().catch(() => {});
+        pending++;
         const src = o.ctx.createBufferSource();
         ownNodes.add(src);
         src.buffer = s.buffer;
-
-        // Boost speech volume via GainNode (1.6x) so Efekta RMS check always passes cleanly!
         const gain = o.ctx.createGain();
         gain.gain.value = 1.6;
         src.connect(gain);
         gain.connect(o.dest);
-
-        src.onended = () => {
-          pending--;
-          if (pending <= 0 && !s.playEndedAt) {
-            s.playEndedAt = Date.now();
-            note("inj-play-ended", { id: s.id, via: "webaudio" });
-          }
-        };
-        const when = leadMs / 1000;
-        src.start(o.ctx.currentTime + when);
+        src.onended = onDone;
+        src.start(o.ctx.currentTime + leadMs / 1000);
       } catch (e) {
-        note("inj-play-error", { id: s.id, error: (e && e.message) || String(e) });
+        note("inj-play-error", { id: s.id, error: String(e) });
       }
     }
+
+    if (pending === 0) s.playEndedAt = Date.now();
     note("inj-play-start", { id: s.id, trigger, durMs });
   }
 
   function cleanupSession(s) {
     if (!s || s.closed) return;
-    // Keep the graph alive until the clip + tail has been fully delivered
     const clipDur = s.buffer ? Math.round(s.buffer.duration * 1000) : 2500;
     const minEnd = (s.playEndsAt || (s.createdAt + (s.leadMs || 200) + clipDur)) + (s.tailMs || 1000);
     if (Date.now() < minEnd) {
@@ -584,25 +570,27 @@
     note("inj-closed", { id: s.id });
   }
 
-  // getUserMedia: real mic unless an injection is explicitly armed right now
+  // getUserMedia: real mic is 100% untouched unless injection is explicitly armed right now
   if (origGUM) {
     try {
       md.getUserMedia = async function (constraints) {
         const wantsAudio = !!(constraints && constraints.audio);
         if (!wantsAudio || !isArmed()) {
-          if (wantsAudio) note("gum-real", {});
+          note("gum-real", { wantsAudio, armed: isArmed() });
           return origGUM.call(md, constraints);
         }
-        const s = consume("getUserMedia");
-        const running = await ensureRunning(s);
-        if (!running) note("inj-ctx-blocked", { id: s.id });
-        if (constraints.video) {
-          try {
-            const v = await origGUM.call(md, { video: constraints.video });
-            v.getVideoTracks().forEach((t) => s.stream.addTrack(t));
-          } catch (_) {}
+        note("gum-inject-start", { armed: true });
+        try {
+          const s = consume("getUserMedia");
+          if (s && s.outputs && s.outputs[0]) {
+            await ensureRunning(s);
+            startPlayback(s, "getUserMedia");
+            return s.outputs[0].stream;
+          }
+        } catch (err) {
+          note("gum-inject-err", { error: String(err) });
         }
-        return s.stream;
+        return origGUM.call(md, constraints);
       };
     } catch (_) {}
   }
@@ -670,7 +658,7 @@
               session && session.stream === st
                 ? session
                 : isArmed()
-                ? consume("createMediaStreamSource", this.sampleRate)
+                ? consume("createMediaStreamSource")
                 : null;
             if (s && s.buffer) {
               note("cmss-inject-direct", { id: s.id, rate: this.sampleRate });
@@ -756,18 +744,19 @@
       case "arm": {
         if (!prepared) return { ok: false, error: "No clip prepared" };
         if (!OrigAudioContext) return { ok: false, error: "Web Audio API not available" };
+        const armId = ++seq;
         armed = {
-          id: ++seq,
+          id: armId,
           buffer: prepared.buffer,
           b64: prepared.b64 || "",
           source: prepared.source,
-          leadMs: Math.max(0, Number(msg.leadMs) || 250),
-          tailMs: Math.max(0, Number(msg.tailMs) || 1400),
-          expiresAt: Date.now() + Math.max(1000, Number(msg.timeoutMs) || 12000)
+          leadMs: Math.max(0, Number(msg.leadMs) || 150),
+          tailMs: Math.max(0, Number(msg.tailMs) || 1200),
+          expiresAt: Date.now() + Math.max(1000, Number(msg.timeoutMs) || 15000)
         };
         session = null;
-        note("armed", { id: armed.id, source: armed.source });
-        return { ok: true, id: armed.id };
+        note("armed", { id: armId, source: armed.source });
+        return { ok: true, id: armId };
       }
       case "click": {
         const sel = msg.selector || msg.target || "button.audio-recorder-btn";

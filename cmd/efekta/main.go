@@ -112,6 +112,8 @@ TURBO MACRO COMMANDS (1-Command-Per-Screen):
   gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order (auto-opens drawers)
   speak [all|"<phrase>"]       Speak target English phrase(s) via native reference audio loopback or TTS!
   dialogue [picks]             Conduct multi-turn AI avatar dialogues (handles speech & tap turns)
+  essay ["<text>"]             Auto-write or type 80+ word formal essay/email, submit & pass evaluation
+  sequence ["<words>"]         Auto-order tokens in tap-sequencing task, reset if needed & advance
   batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
 
 CORE COMMANDS:
@@ -343,6 +345,24 @@ func main() {
 			target = strings.Join(posArgs[1:], " ")
 		}
 		resp, err := execCommand(protocol.Command{Action: "autopilot", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "essay", "write":
+		target := "auto"
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "essay", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "sequence":
+		target := "auto"
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "sequence", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 
@@ -592,7 +612,32 @@ func handleSimpleResponse(resp *protocol.Response, err error, jsonOut bool) {
 		os.Exit(1)
 	}
 	if !resp.Success {
-		outputError(fmt.Errorf("%s", resp.Error), jsonOut)
+		errMsg := resp.Error
+		if errMsg == "" {
+			if resSlice, ok := resp.Results.([]interface{}); ok && len(resSlice) > 0 {
+				for _, r := range resSlice {
+					if rMap, ok := r.(map[string]interface{}); ok {
+						if success, _ := rMap["success"].(bool); !success {
+							if e, _ := rMap["error"].(string); e != "" {
+								errMsg = e
+								break
+							}
+							if m, _ := rMap["message"].(string); m != "" {
+								errMsg = m
+								break
+							}
+						}
+					}
+				}
+			}
+			if errMsg == "" && resp.Message != "" {
+				errMsg = resp.Message
+			}
+			if errMsg == "" {
+				errMsg = "Command execution failed"
+			}
+		}
+		outputError(fmt.Errorf("%s", errMsg), jsonOut)
 		os.Exit(1)
 	}
 	if jsonOut {

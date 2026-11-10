@@ -56,7 +56,7 @@ func TestMCPServeStream(t *testing.T) {
 	}
 	resMap := listResp["result"].(map[string]interface{})
 	tools := resMap["tools"].([]interface{})
-	if len(tools) != 15 {
-		t.Errorf("expected 15 MCP tools, got %d", len(tools))
+	if len(tools) != 17 {
+		t.Errorf("expected 17 MCP tools, got %d", len(tools))
 	}
 }

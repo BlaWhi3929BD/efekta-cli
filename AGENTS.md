@@ -37,8 +37,9 @@ Look at `data.agentHint.exerciseType` from your last response and immediately ru
 | `categorize_columns` | 2 category `slots` + N draggable `items` | `efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c` |
 | `selection_gaps` | `contextText` has `[slot-1]` + bottom word drawer | `efekta batch "gaps word1, word2, word3, word4, word5; next" --json -c` |
 | `fill_in_the_blanks` (short blanks) | `contextText` has `[input-1]` text blanks | `efekta batch "gaps answer1, answer2, answer3; next" --json -c` |
-| `fill_in_the_blanks` (75+ word essay)| `textarea` asking for writing | `efekta batch "type input-1 '<100+ word essay>'; next" --json -c` |
-| `order_sentence` | `items` are shuffled sentence words | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
+| `writing_essay` (75+ word essay)| `textarea` asking for writing | `efekta batch "essay; next" --json -c` *(or `efekta essay --json -c`)* |
+| `order_sentence` (tap sequence) | `ef-sequencing-tap-option-task` tokens | `efekta batch "sequence auto; next" --json -c` *(or `sequence 'word1 word2...'; next`)* |
+| `order_sentence` (token picker) | `items` are shuffled sentence words | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
 | `order_dialogue` | `items` are dialogue turns (`cdk-drag`) | `efekta batch "drag item-2 item-1; next" --json -c` |
 | `speaking_practice` | Pronunciation drill with target phrase | `efekta skip --json -c` *(or `efekta batch "speak all; next" --json -c`)* |
 | `speaking_avatar` (mandatory final) | AI video avatar roleplay (turns A/B/C) | `efekta batch "dialogue; next" --json -c` *(or `efekta batch "speak opt-2; next" --json -c`)* |
@@ -94,3 +95,20 @@ efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
 efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
 ```
 - Snapshots item clean texts upfront before clicking, ensuring DOM removal across items never loses track of the remaining items.
+
+### `essay` — Automatic 80+ Word Formal Essay / Email Writer
+```bash
+efekta batch "essay; next" --json -c
+```
+- Extracts task prompt and bullet points from stimulus.
+- Auto-generates a fluent, high-register formal B2 English email/essay satisfying all requirements (>85 words).
+- Types it into the textarea, clicks Next, automatically answers the self-evaluation screen ("How did you find the task?"), and advances!
+
+### `sequence` — Tap-Option Sentence & Dialogue Sequencer
+```bash
+efekta batch "sequence auto; next" --json -c
+# Or pass target sentence directly:
+efekta batch "sequence 'First time. Yeah, that\\'s right.'; next" --json -c
+```
+- Automatically resets any tokens already placed in the ordered list back to the pool.
+- Clicks each token in exact target order and clicks Check to advance.
