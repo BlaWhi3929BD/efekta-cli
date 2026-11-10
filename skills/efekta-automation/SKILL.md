@@ -1,9 +1,9 @@
 ---
 name: efekta-automation
-description: Ultra-fast 1-command-per-screen automation for learn.better.efekta.com using the efekta v2.2 Turbo CLI and MCP server.
+description: Ultra-fast 1-command-per-screen automation for learn.better.efekta.com using the efekta v3.0 Turbo CLI and MCP server.
 ---
 
-# Efekta Automation Skill (Turbo Engine v2.2)
+# Efekta Automation Skill (Turbo Engine v3.0)
 
 Use this skill whenever the user asks you to complete lessons, units, or levels on `learn.better.efekta.com`.
 
@@ -38,6 +38,10 @@ Use this skill whenever the user asks you to complete lessons, units, or levels 
 - **`order_sentence`**:
   ```bash
   efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c
+  ```
+- **`writing_challenge` (Personal statement / essay 80+ words)**:
+  ```bash
+  efekta type input-1 "Your 80+ word text..."; efekta next --json -c
   ```
 - **`speaking_practice`**:
   ```bash

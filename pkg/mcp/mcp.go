@@ -156,6 +156,19 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 		{
+			"name":        "efekta_next",
+			"description": "Auto-advance and fast-forward through consecutive passive screens (reading cards, 'Correct answers' reviews, 'Step passed!' celebrations, Lesson Overviews) until the next interactive exercise.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"compact": map[string]interface{}{
+						"type":        "boolean",
+						"description": "Strip verbose coordinate dump to save 80% tokens (default: true)",
+					},
+				},
+			},
+		},
+		{
 			"name":        "efekta_click",
 			"description": "Click an interactive element on Efekta by virtual ID (e.g. 'opt-1', 'next-1', 'stage-4'), CSS selector, exact text, or 'x,y' coordinates.",
 			"inputSchema": map[string]interface{}{
@@ -335,6 +348,8 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 	switch params.Name {
 	case "efekta_status":
 		cmd = protocol.Command{Action: "status"}
+	case "efekta_next":
+		cmd = protocol.Command{Action: "next"}
 	case "efekta_click":
 		cmd = protocol.Command{Action: "click", Target: strArg("target")}
 	case "efekta_drag":

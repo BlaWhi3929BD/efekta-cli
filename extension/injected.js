@@ -839,6 +839,16 @@
         if (msg.closeSession && session) cleanupSession(session);
         return { ok: true, wasArmed: was };
       }
+      case "eval": {
+        try {
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const fn = new AsyncFunction("document", "window", msg.code);
+          const res = await fn(document, window);
+          return { ok: true, result: res };
+        } catch (e) {
+          return { ok: false, error: e.message };
+        }
+      }
       default:
         return { ok: false, error: "Unknown voice bridge message: " + msg.type };
     }

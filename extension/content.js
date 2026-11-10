@@ -110,7 +110,7 @@
   function cleanText(el) {
     if (!el) return "";
     const hiddenSelector =
-      ".cdk-visually-hidden, .sr-only, .visually-hidden, .screen-reader-overview, [aria-hidden='true'], [hidden], .longest-option, ef-icon, mat-icon, svg, script, style";
+      ".cdk-visually-hidden, .sr-only, .visually-hidden, .screen-reader-overview, [hidden], .longest-option, ef-icon, mat-icon, svg, script, style";
     let raw = "";
     try {
       const doc = el.ownerDocument || document;
@@ -294,6 +294,17 @@
       hitEl.dispatchEvent(new MEvent("click", upInit));
     }
 
+    if (el && el !== hitEl && typeof el.click === "function") {
+      try {
+        el.click();
+      } catch (_) {}
+    }
+    if (rawEl && rawEl !== el && rawEl !== hitEl && typeof rawEl.click === "function") {
+      try {
+        rawEl.click();
+      } catch (_) {}
+    }
+
     return true;
   }
 
@@ -332,6 +343,9 @@
       pointerType: "mouse"
     };
 
+    const win = (sourceEl.ownerDocument && sourceEl.ownerDocument.defaultView) || window;
+    const doc = sourceEl.ownerDocument || document;
+
     sourceEl.dispatchEvent(new PointerEvent("pointerover", downInit));
     sourceEl.dispatchEvent(new MouseEvent("mouseover", downInit));
     sourceEl.dispatchEvent(new PointerEvent("pointerdown", downInit));
@@ -354,9 +368,9 @@
       );
     } catch (_) {}
 
-    await sleep(18);
+    await sleep(40);
 
-    const steps = 6;
+    const steps = 12;
     for (let i = 1; i <= steps; i++) {
       const curX = startX + ((endX - startX) * i) / steps;
       const curY = startY + ((endY - startY) * i) / steps;
@@ -364,11 +378,11 @@
         bubbles: true,
         cancelable: true,
         composed: true,
-        view: window,
+        view: win,
         clientX: curX,
         clientY: curY,
-        screenX: curX + (window.screenX || 0),
-        screenY: curY + (window.screenY || 0),
+        screenX: curX + (win.screenX || 0),
+        screenY: curY + (win.screenY || 0),
         button: 0,
         buttons: 1,
         isPrimary: true,
@@ -376,11 +390,13 @@
         pointerType: "mouse"
       };
 
-      const hoverEl = document.elementFromPoint(curX, curY) || targetEl;
+      const hoverEl = doc.elementFromPoint(curX, curY) || targetEl;
       hoverEl.dispatchEvent(new PointerEvent("pointermove", moveInit));
       hoverEl.dispatchEvent(new MouseEvent("mousemove", moveInit));
-      document.dispatchEvent(new PointerEvent("pointermove", moveInit));
-      document.dispatchEvent(new MouseEvent("mousemove", moveInit));
+      doc.dispatchEvent(new PointerEvent("pointermove", moveInit));
+      doc.dispatchEvent(new MouseEvent("mousemove", moveInit));
+      win.dispatchEvent(new PointerEvent("pointermove", moveInit));
+      win.dispatchEvent(new MouseEvent("mousemove", moveInit));
 
       if (dataTransfer) {
         if (i === steps - 1) {
@@ -406,7 +422,7 @@
           })
         );
       }
-      await sleep(10);
+      await sleep(25);
     }
 
     if (dataTransfer) {
@@ -426,11 +442,11 @@
       bubbles: true,
       cancelable: true,
       composed: true,
-      view: window,
+      view: win,
       clientX: endX,
       clientY: endY,
-      screenX: endX + (window.screenX || 0),
-      screenY: endY + (window.screenY || 0),
+      screenX: endX + (win.screenX || 0),
+      screenY: endY + (win.screenY || 0),
       button: 0,
       buttons: 0,
       isPrimary: true,
@@ -440,8 +456,10 @@
 
     targetEl.dispatchEvent(new PointerEvent("pointerup", upInit));
     targetEl.dispatchEvent(new MouseEvent("mouseup", upInit));
-    document.dispatchEvent(new PointerEvent("pointerup", upInit));
-    document.dispatchEvent(new MouseEvent("mousemove", upInit));
+    doc.dispatchEvent(new PointerEvent("pointerup", upInit));
+    doc.dispatchEvent(new MouseEvent("mouseup", upInit));
+    win.dispatchEvent(new PointerEvent("pointerup", upInit));
+    win.dispatchEvent(new MouseEvent("mouseup", upInit));
 
     if (dataTransfer) {
       sourceEl.dispatchEvent(
@@ -578,6 +596,15 @@
       );
       el.dispatchEvent(new KeyboardEvent("keyup", { key: lastCh, bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
+      const wci = el.closest ? el.closest("ef-writing-challenge-input") : null;
+      if (wci && wci.__zone_symbol__onInputChangedfalse) {
+        const z = wci.__zone_symbol__onInputChangedfalse;
+        if (z && z[0] && typeof z[0].callback === "function") {
+          try {
+            z[0].callback(str);
+          } catch (_) {}
+        }
+      }
       await sleep(30);
       return true;
     }
@@ -1364,7 +1391,7 @@
             if (
               p.closest &&
               p.closest(
-                ".cdk-visually-hidden, .sr-only, .screen-reader-overview, [aria-hidden='true'], [hidden], .longest-option, ef-icon, svg"
+                ".cdk-visually-hidden, .sr-only, .screen-reader-overview, [hidden], .longest-option, ef-icon, svg"
               )
             ) {
               return NodeFilter.FILTER_REJECT;
@@ -2990,6 +3017,16 @@
       case "eval": {
         const rawTarget = cmd.target || "body";
         const docs = getAllDocs();
+
+        if (rawTarget.startsWith("page:") || rawTarget.startsWith("js:")) {
+          const code = rawTarget.slice(rawTarget.indexOf(":") + 1).trim();
+          const r = await callVoiceBridge({ type: "eval", code });
+          return {
+            success: r && r.ok,
+            data: r ? r.result : null,
+            error: r ? r.error : "No bridge response"
+          };
+        }
 
         if (rawTarget.startsWith("info:")) {
           const sel = rawTarget.slice(5).trim();
