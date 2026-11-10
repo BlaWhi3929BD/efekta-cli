@@ -1,103 +1,68 @@
 # Efekta AI Agent Turbo Guide (`learn.better.efekta.com`)
 
-This guide is designed so that **any AI agent** (even slow-thinking models) can complete an entire Efekta lesson in **6–10 total CLI calls** instead of 80+ slow step-by-step calls.
+This guide is designed so that **any AI agent** (even lightweight or local models) can complete Efekta lessons and tests with maximum speed, zero token waste, and 100% accuracy.
 
 ---
 
-## 1. Why Previous Agent Execution Was Slow (And How Turbo v2.2 Solves It)
+## 0. The 5 Golden Rules of Efekta Automation
 
-| Old Bottleneck | Turbo v2.2 Solution |
-| :--- | :--- |
-| Calling `efekta status` after every click | **Every command returns the updated state (`data`) automatically.** Never call `status` after an action! |
-| Calling `click next-1` on 4 consecutive reading cards / `"Step passed!"` screens | **`next` (or `; next` at the end of a `batch`) auto-fast-forwards** through up to 7 consecutive passive screens, reading cards, `"Correct answers"` reviews, and Lesson Overviews, collecting their text in `autoReadNotes` and stopping at the next interactive exercise! |
-| Inserting manual `wait 300`, `wait 500`, `wait 1200` | **`content.js` automatically polls `waitUntilUnlocked()`** until `.locked` and `.item-disabled` clear before every click. |
-| Sorting items removed DOM nodes and shifted `opt-3` -> `opt-2` mid-batch | **`sort`, `pair`, and `pick` snapshot element texts upfront** before the first click, resolving each item by its snapshotted text even if the DOM re-renders. |
-| Opening selection-gap drawers one by one (`click slot-1` -> `status` -> `click opt-3`) | **`gaps word1, word2, word3` handles the entire screen in 1 command:** clicks each unfilled `selection-gap-button`, waits for `.drawer-option` to open, clicks the matching word, and repeats! |
-| Parsing 40+ noisy elements with duplicated screen-reader text (`"stress stress"`) | **`--json -c` (Compact Mode) + `agentHint`:** strips screen-reader duplicates, hides media player chrome, and gives you a pre-built `agentHint.actionTemplate` + clean `slots`, `items`, and `options` lists! |
+1. **LET THE PROGRAM DO THE WORK FIRST (`efekta auto`):**
+   `efekta auto --json -c` autonomously glides through passive reading cards, auto-skips pronunciation drills, auto-solves multiple choice, conducts avatar dialogues, and writes essays. Only stop when human knowledge tasks (`gaps`, `sort`, `pair`) need your answer!
+2. **ALWAYS end every interactive batch with `; next` (or `; auto`):**
+   Appending `; next` clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" reviews, self-evaluations, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
+3. **ALWAYS read `agentHint` first (use `--json -c` for 80% smaller output):**
+   `agentHint` gives you `exerciseType`, `slots`, `items`, `options` (pre-populated even on selection_gaps!), and a ready-to-fill `actionTemplate`.
+4. **SKIP MULTI-PHRASE PRONUNCIATION DRILLS IN 1 COMMAND (`efekta skip`):**
+   Whenever a pronunciation drill appears in Stages 1–5, run `efekta skip --json -c` to skip all 5–7 phrases in 1 single shot and advance!
+5. **PROGRESS TEST MANDATE ("Take the final test") — ZERO TRIAL-AND-ERROR:**
+   - **TRIAL-AND-ERROR / BRUTE-FORCE (`solve choice`) IS STRICTLY FORBIDDEN ON FORMAL TESTS!**
+   - On the Progress Test, every question is an unrepeatable formal assessment; incorrect choices directly degrade the certificate score below the mandatory 70% threshold.
+   - The engine automatically detects Progress Tests (`exerciseType: "progress_test_choice"`) and actively blocks `solve choice` and `auto` to safeguard your exam score.
+   - Always derive the correct answer using precise grammatical, syntactical, and context-specific linguistic analysis, then submit with `efekta batch "pick opt-X; next" --json -c`.
 
 ---
 
-## 2. The 1-Look Decision Table (Memorize This!)
+## 1. Instant Decision Table (`agentHint.exerciseType` -> 1 Command)
 
 Always run commands with `--json -c`. Look ONLY at `data.agentHint` and `data.contextText`:
 
-### Case 1: `passive_screen` or `lesson_overview`
-When `agentHint.exerciseType` is `"passive_screen"` or `"lesson_overview"`:
+| `exerciseType` | What You See in `agentHint` | 1-Roundtrip CLI Command | MCP Tool Equivalent |
+| :--- | :--- | :--- | :--- |
+| `course_overview` / dashboard | On `/gap/ui/self-study` | `efekta lesson next --json -c` | `efekta_lesson(target="next")` |
+| `passive_screen` / `lesson_overview` | `canProceed: true` or `stage-N` | `efekta next --json -c` *(or `efekta auto`)* | `efekta_autopilot()` |
+| `multiple_choice` (Lesson) | `options: ["opt-1: ...", ...]` | `efekta batch "solve choice; next" --json -c` | `efekta_solve(strategy="choice")` |
+| **`progress_test_choice` (Final Test)** | Graded single-shot exam question | `efekta batch "pick opt-X; next" --json -c` *(Analyze first!)* | `efekta_batch(commands="pick opt-X; next")` |
+| `speaking_practice` | Pronunciation drill (Stages 1–5) | `efekta skip --json -c` | `efekta_solve(strategy="speak")` |
+| `speaking_avatar` | Final avatar dialogue | `efekta batch "dialogue; next" --json -c` | `efekta_dialogue()` |
+| `selection_gaps` | `[slot-N]` + drawer options | `efekta batch "gaps word1, word2; next" --json -c` | `efekta_batch(commands="gaps ...; next")` |
+| `fill_in_the_blanks` | `[input-N]` text blanks | `efekta batch "gaps ans1, ans2; next" --json -c` | `efekta_batch(commands="gaps ...; next")` |
+| `writing_essay` | 80–120+ word textarea | `efekta batch "essay; next" --json -c` | `efekta_essay(text="auto")` |
+| `matching_pairs` | `slots` + `items` | `efekta batch "pair slot-1:item-2; next" --json -c` | `efekta_batch(commands="pair ...; next")` |
+| `categorize_columns` | Category `slots` + `items` | `efekta batch "sort slot-1:item-1; next" --json -c` | `efekta_batch(commands="sort ...; next")` |
+| `order_sentence` (tap sequence) | `ef-sequencing-tap-option-task` | `efekta batch "sequence auto; next" --json -c` | `efekta_sequence(tokens="auto")` |
+| `order_sentence` (token picker) | Shuffled words in `items` | `efekta batch "pick item-3,item-1; next" --json -c` | `efekta_batch(commands="pick ...; next")` |
+| `order_dialogue` | Dialogue turns (`cdk-drag`) | `efekta batch "drag item-2 item-1; next" --json -c` | `efekta_batch(commands="drag ...; next")` |
+
+---
+
+## 2. Autonomous Lesson Selection & Management
+
 ```bash
-efekta next --json -c
+# Automatically find and open the first incomplete lesson
+efekta lesson next --json -c
+
+# View all units, lessons, completion status & next lesson recommendation
+efekta lesson list --json -c
+
+# Jump directly to a specific unit & lesson
+efekta lesson U3L2 --json -c
+
+# Jump directly to the final progress test
+efekta lesson TEST --json -c
+
+# Resume active lesson player
+efekta lesson resume --json -c
+
+# Exit active lesson player back to self-study dashboard
+efekta lesson close --json -c
 ```
-*Result:* Clicks Next / enters the next incomplete lesson step, glides through all intro/reading cards, and stops on the first real exercise!
-
-### Case 2: `matching_pairs` ("Tap to match")
-`agentHint` shows:
-- `slots`: `["slot-1: Reduce", "slot-2: Improve", "slot-3: Work"]`
-- `items`: `["item-1: your diet", "item-2: fewer hours", "item-3: stress"]`
-
-Match all pairs + advance in **1 command**:
-```bash
-efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c
-```
-
-### Case 3: `categorize_columns` ("Sort the items")
-`agentHint` shows:
-- `slots`: `["slot-1: Good habits", "slot-2: Bad habits"]`
-- `items`: `["item-1: eat well", "item-2: work late", "item-3: exercise", "item-4: skip lunch"]`
-
-Sort all items into both categories + advance in **1 command**:
-```bash
-efekta batch "sort slot-1:item-1,item-3; sort slot-2:item-2,item-4; next" --json -c
-```
-
-### Case 4: `selection_gaps` or `fill_in_the_blanks` ("Tap on the gaps...")
-`contextText` shows sentences with inline `[slot-1]` or `[input-1]` markers.
-Fill all gaps in order + advance in **1 command**:
-```bash
-efekta batch "gaps wait, better, time, lifestyle, yourself; next" --json -c
-```
-*(Note: If `slot-1` was already filled with `"changes"` and `slot-2..slot-6` are empty, `gaps` automatically starts at the first unfilled gap button! You can also target specific gaps explicitly: `gaps slot-2=wait, slot-3=better`.)*
-
-### Case 5: `multiple_choice` (Single or Multi-Select)
-- **Single answer:**
-  ```bash
-  efekta batch "pick opt-2; next" --json -c
-  ```
-  *(Or brute-force unknown single choice: `efekta batch "solve choice; next" --json -c`)*
-- **Multi-select ("Choose two" / "Choose three"):**
-  ```bash
-  efekta batch "pick opt-1,opt-3,opt-5; next" --json -c
-  ```
-
-### Case 6: `order_sentence` ("Put the words in the correct order")
-- **Capital letter rule:** First word starts with a capital letter (check non-`"I"` capitalized words first).
-- **Punctuation rule:** Last word ends with `.`, `?`, or `!`.
-Click all tokens in order + advance in **1 command**:
-```bash
-efekta batch "pick item-4,item-1,item-5,item-2,item-3; next" --json -c
-```
-
-### Case 7: `speaking_practice` (Pronunciation Drill with Microphone)
-- Target phrase is displayed in `agentHint.summary` and `contextText`.
-- Complete all phrases in the drill + advance in **1 command**:
-  ```bash
-  efekta batch "speak all; next" --json -c
-  ```
-  *(Voice Engine v3 captures native reference audio or synthesizes clean English TTS via daemon `/api/tts`, feeds it cleanly into the one-shot armed microphone stream, and leaves the user's real microphone 100% untouched for when they speak).*
-
-### Case 8: `speaking_avatar` (Microphone / AI Video Human)
-- **Non-final stage (`skip-1` is present):**
-  ```bash
-  efekta batch "click skip-1; next" --json -c
-  ```
-- **Final stage (Mandatory AI Avatar Dialogue, no `skip-1`):**
-  Efekta presents response options (A, B, C) in `agentHint.options`.
-  - **Tap mode (buttons visible):** Pick the chosen option directly + advance in 1 command:
-    ```bash
-    efekta batch "pick opt-2; next" --json -c
-    ```
-  - **Speech mode (microphone visible):** Speak the chosen option directly + advance in 1 command:
-    ```bash
-    efekta batch "speak opt-2; next" --json -c
-    # or by letter:
-    efekta batch "speak B; next" --json -c
-    ```
-  *(Never invent arbitrary responses: always choose from the options listed in `agentHint.options`).*

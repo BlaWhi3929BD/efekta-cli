@@ -46,6 +46,9 @@ func ensureDaemon() error {
 	}
 
 	cmd := exec.Command(exePath, "daemon", "run")
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	configureBackgroundProcess(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("failed to auto-start daemon: %w", err)

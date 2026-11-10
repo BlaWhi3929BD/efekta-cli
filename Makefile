@@ -1,6 +1,7 @@
 BINARY_NAME=efekta
 BUILD_DIR=bin
 DIST_DIR=dist
+TARGET_DIR=$(HOME)/.local/bin
 
 .PHONY: all build test install clean release
 
@@ -15,8 +16,12 @@ test:
 	go test -race -v ./...
 
 install: build
-	@mkdir -p ~/.local/bin
-	ln -sf $(CURDIR)/$(BUILD_DIR)/$(BINARY_NAME) ~/.local/bin/$(BINARY_NAME)
+	@mkdir -p $(TARGET_DIR)
+	@rm -f $(TARGET_DIR)/$(BINARY_NAME)
+	cp -f $(BUILD_DIR)/$(BINARY_NAME) $(TARGET_DIR)/$(BINARY_NAME)
+	@chmod +x $(TARGET_DIR)/$(BINARY_NAME)
+	@echo "✓ Installed $(BINARY_NAME) to $(TARGET_DIR)/$(BINARY_NAME)"
+	@echo "Ensure $(TARGET_DIR) is in your PATH."
 
 release:
 	@mkdir -p $(DIST_DIR)

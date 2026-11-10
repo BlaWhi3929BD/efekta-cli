@@ -276,7 +276,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func GetPIDFilePath() string {
-	home, _ := os.UserHomeDir()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(os.TempDir(), "efekta-daemon.pid")
+	}
 	return filepath.Join(home, ".efekta-daemon.pid")
 }
 
