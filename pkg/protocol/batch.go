@@ -6,7 +6,7 @@ import (
 )
 
 // ParseBatchString parses a semicolon-separated chain of commands into BatchSubCommands.
-// Supports turbo macro actions: pick, pair/match, sort, gaps/fill, speak/say, next/ff, plus click, drag, type, press, scroll, wait, solve, voice.
+// Supports turbo macro actions: pick, pair/match, sort, gaps/fill, speak/say, dialogue/avatar, auto/autopilot, next/ff, plus click, drag, type, press, scroll, wait, solve, voice.
 func ParseBatchString(batchStr string) []BatchSubCommand {
 	var subs []BatchSubCommand
 	parts := strings.Split(batchStr, ";")
@@ -49,6 +49,10 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 				target = "all"
 			}
 			subs = append(subs, BatchSubCommand{Action: "speak", Target: target})
+		case "dialogue", "avatar":
+			subs = append(subs, BatchSubCommand{Action: "dialogue", Target: rest})
+		case "auto", "autopilot":
+			subs = append(subs, BatchSubCommand{Action: "autopilot", Target: rest})
 		case "voice":
 			target := rest
 			if target == "" {
@@ -63,6 +67,8 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 				}
 			}
 			subs = append(subs, BatchSubCommand{Action: "next", Amount: hops})
+		case "skip":
+			subs = append(subs, BatchSubCommand{Action: "skip", Target: rest})
 		case "seek":
 			subs = append(subs, BatchSubCommand{Action: "seek", Target: rest})
 		case "drag":

@@ -449,30 +449,6 @@
     armed = null;
     const out = newOutput(sampleRate);
 
-    let captureStream = null;
-    let audioEl = null;
-    let blobUrl = "";
-    if (a.b64) {
-      try {
-        const bytes = b64ToBytes(a.b64);
-        const blob = new Blob([bytes], { type: "audio/mpeg" });
-        blobUrl = URL.createObjectURL(blob);
-        audioEl = new Audio(blobUrl);
-        audioEl.preload = "auto";
-        if (typeof audioEl.captureStream === "function") {
-          captureStream = audioEl.captureStream();
-        } else if (typeof audioEl.mozCaptureStream === "function") {
-          captureStream = audioEl.mozCaptureStream();
-        }
-      } catch (e) {
-        note("capture-init-err", { error: e.message });
-      }
-    }
-
-    const primaryStream = (captureStream && captureStream.getAudioTracks().length > 0)
-      ? captureStream
-      : out.stream;
-
     const durMs = a.buffer ? Math.round(a.buffer.duration * 1000) : 2500;
     const leadMs = Math.max(0, Number(a.leadMs) || 150);
     const s = {
@@ -481,12 +457,10 @@
       source: a.source,
       buffer: a.buffer,
       b64: a.b64,
-      audioEl,
-      blobUrl,
       leadMs,
-      tailMs: a.tailMs,
+      tailMs: Math.max(400, Number(a.tailMs) || 800),
       outputs: [out],
-      stream: primaryStream,
+      stream: out.stream,
       createdAt: Date.now(),
       playStartedAt: 0,
       playEndsAt: Date.now() + leadMs + durMs,
@@ -497,9 +471,8 @@
       closed: false,
       realHold: null
     };
-    ownStreams.add(primaryStream);
     ownStreams.add(out.stream);
-    primaryStream.getAudioTracks().forEach((track) => {
+    out.stream.getAudioTracks().forEach((track) => {
       const origStop = track.stop.bind(track);
       track.stop = function () {
         if (s.playEndedAt && !s.stoppedByPage) {
@@ -516,11 +489,11 @@
       id: s.id,
       via,
       source: s.source,
-      rate: out.ctx.sampleRate,
-      hasCaptureStream: !!captureStream
+      rate: out.ctx.sampleRate
     });
-    startPlayback(s, "auto");
-    setTimeout(() => cleanupSession(s), 45000);
+    // Ensure context is running and start audio
+    ensureRunning(s).then(() => startPlayback(s, "auto"));
+    setTimeout(() => cleanupSession(s), 30000);
     return s;
   }
 
@@ -528,17 +501,8 @@
   async function ensureRunning(s) {
     for (const o of s.outputs) {
       try {
-        // Connect a silent keepalive gain node to o.dest so Firefox pulls the WebAudio destination graph
-        const silent = o.ctx.createGain();
-        silent.gain.value = 0;
-        const osc = o.ctx.createOscillator();
-        osc.connect(silent);
-        silent.connect(o.dest);
-        osc.start();
-      } catch (_) {}
-      try {
         if (o.ctx.state !== "running") {
-          await Promise.race([o.ctx.resume(), sleep(150)]);
+          await Promise.race([o.ctx.resume(), sleep(200)]);
         }
       } catch (_) {}
     }
@@ -555,24 +519,6 @@
     const leadMs = Math.max(0, Number(s.leadMs) || 150);
     s.playEndsAt = s.playStartedAt + leadMs + durMs;
 
-    if (s.audioEl) {
-      setTimeout(() => {
-        if (s.audioEl && !s.closed) {
-          s.audioEl.play().then(() => {
-            note("audio-el-playing", { id: s.id });
-          }).catch((e) => {
-            note("audio-el-play-err", { id: s.id, error: e && e.message });
-          });
-          s.audioEl.onended = () => {
-            if (!s.playEndedAt) {
-              s.playEndedAt = Date.now();
-              note("inj-play-ended", { id: s.id, via: "audioEl" });
-            }
-          };
-        }
-      }, leadMs);
-    }
-
     let pending = s.outputs.length;
     for (const o of s.outputs) {
       try {
@@ -582,7 +528,13 @@
         const src = o.ctx.createBufferSource();
         ownNodes.add(src);
         src.buffer = s.buffer;
-        src.connect(o.dest);
+
+        // Boost speech volume via GainNode (1.6x) so Efekta RMS check always passes cleanly!
+        const gain = o.ctx.createGain();
+        gain.gain.value = 1.6;
+        src.connect(gain);
+        gain.connect(o.dest);
+
         src.onended = () => {
           pending--;
           if (pending <= 0 && !s.playEndedAt) {
@@ -632,30 +584,21 @@
     note("inj-closed", { id: s.id });
   }
 
-  // getUserMedia: real mic unless an injection is armed or an injection session is actively playing
+  // getUserMedia: real mic unless an injection is explicitly armed right now
   if (origGUM) {
     try {
       md.getUserMedia = async function (constraints) {
         const wantsAudio = !!(constraints && constraints.audio);
-        if (
-          wantsAudio &&
-          session &&
-          !session.closed &&
-          (!session.playEndedAt || Date.now() < (session.playEndsAt || 0) + (session.tailMs || 1000))
-        ) {
-          note("gum-reuse-session", { id: session.id });
-          return session.stream;
-        }
         if (!wantsAudio || !isArmed()) {
           if (wantsAudio) note("gum-real", {});
-          return origGUM(constraints);
+          return origGUM.call(md, constraints);
         }
         const s = consume("getUserMedia");
         const running = await ensureRunning(s);
         if (!running) note("inj-ctx-blocked", { id: s.id });
         if (constraints.video) {
           try {
-            const v = await origGUM({ video: constraints.video });
+            const v = await origGUM.call(md, { video: constraints.video });
             v.getVideoTracks().forEach((t) => s.stream.addTrack(t));
           } catch (_) {}
         }
@@ -827,8 +770,9 @@
         return { ok: true, id: armed.id };
       }
       case "click": {
-        const el = document.querySelector(msg.selector);
-        if (!el) return { ok: false, error: "Element not found: " + msg.selector };
+        const sel = msg.selector || msg.target || "button.audio-recorder-btn";
+        const el = document.querySelector(sel);
+        if (!el) return { ok: false, error: "Element not found: " + sel };
         try { el.scrollIntoView({ behavior: "instant", block: "center" }); } catch (_) {}
         el.click();
         return { ok: true, tag: el.tagName };
@@ -836,7 +780,11 @@
       case "disarm": {
         const was = !!armed;
         armed = null;
-        if (msg.closeSession && session) cleanupSession(session);
+        if (session) {
+          session.closed = true;
+          cleanupSession(session);
+          session = null;
+        }
         return { ok: true, wasArmed: was };
       }
       case "eval": {

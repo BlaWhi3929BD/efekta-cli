@@ -288,21 +288,16 @@
     hitEl.dispatchEvent(new PEvent("pointerup", upInit));
     hitEl.dispatchEvent(new MEvent("mouseup", upInit));
 
-    if (typeof hitEl.click === "function") {
-      hitEl.click();
-    } else {
-      hitEl.dispatchEvent(new MEvent("click", upInit));
-    }
+    const targetToClick =
+      el && (el.tagName === "BUTTON" || el.tagName === "INPUT" || el.getAttribute("role") === "button" || el.hasAttribute("data-efekta-id"))
+        ? el
+        : (hitEl || el);
 
-    if (el && el !== hitEl && typeof el.click === "function") {
-      try {
-        el.click();
-      } catch (_) {}
-    }
-    if (rawEl && rawEl !== el && rawEl !== hitEl && typeof rawEl.click === "function") {
-      try {
-        rawEl.click();
-      } catch (_) {}
+    // EXACTLY ONE click: a second click would toggle selectable cards (matching/multi-select) straight back off
+    if (typeof targetToClick.click === "function") {
+      targetToClick.click();
+    } else {
+      targetToClick.dispatchEvent(new MEvent("click", upInit));
     }
 
     return true;
@@ -480,16 +475,16 @@
   // React/Angular compatible controlled input value setter
   function setNativeValue(el, value) {
     const tag = el.tagName ? el.tagName.toLowerCase() : "";
+    const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
     let proto = null;
-    if (tag === "input") proto = window.HTMLInputElement.prototype;
-    else if (tag === "textarea") proto = window.HTMLTextAreaElement.prototype;
-    else if (tag === "select") proto = window.HTMLSelectElement.prototype;
+    if (tag === "input") proto = win.HTMLInputElement ? win.HTMLInputElement.prototype : null;
+    else if (tag === "textarea") proto = win.HTMLTextAreaElement ? win.HTMLTextAreaElement.prototype : null;
+    else if (tag === "select") proto = win.HTMLSelectElement ? win.HTMLSelectElement.prototype : null;
 
     if (proto) {
       const descriptor = Object.getOwnPropertyDescriptor(proto, "value");
       if (descriptor && descriptor.set) {
         descriptor.set.call(el, value);
-        return;
       }
     }
     el.value = value;
@@ -551,64 +546,7 @@
       new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" })
     );
 
-    if (str.length > 35) {
-      // Instant bulk fill for long essays / sentences with realistic final keystroke events
-      const prefix = str.slice(0, -1);
-      const lastCh = str.slice(-1);
-      if (prefix) {
-        el.dispatchEvent(
-          new InputEvent("beforeinput", {
-            bubbles: true,
-            cancelable: true,
-            inputType: "insertText",
-            data: prefix
-          })
-        );
-        setNativeValue(el, prefix);
-        el.dispatchEvent(
-          new InputEvent("input", {
-            bubbles: true,
-            cancelable: false,
-            inputType: "insertText",
-            data: prefix
-          })
-        );
-      }
-      el.dispatchEvent(
-        new KeyboardEvent("keydown", { key: lastCh, bubbles: true, cancelable: true })
-      );
-      el.dispatchEvent(
-        new InputEvent("beforeinput", {
-          bubbles: true,
-          cancelable: true,
-          inputType: "insertText",
-          data: lastCh
-        })
-      );
-      setNativeValue(el, str);
-      el.dispatchEvent(
-        new InputEvent("input", {
-          bubbles: true,
-          cancelable: false,
-          inputType: "insertText",
-          data: lastCh
-        })
-      );
-      el.dispatchEvent(new KeyboardEvent("keyup", { key: lastCh, bubbles: true }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      const wci = el.closest ? el.closest("ef-writing-challenge-input") : null;
-      if (wci && wci.__zone_symbol__onInputChangedfalse) {
-        const z = wci.__zone_symbol__onInputChangedfalse;
-        if (z && z[0] && typeof z[0].callback === "function") {
-          try {
-            z[0].callback(str);
-          } catch (_) {}
-        }
-      }
-      await sleep(30);
-      return true;
-    }
-
+    const stepDelay = str.length > 80 ? 1 : (delayMs || 4);
     let current = "";
     for (const ch of str) {
       current += ch;
@@ -633,8 +571,12 @@
         })
       );
       el.dispatchEvent(new KeyboardEvent("keyup", { key: ch, bubbles: true }));
-      if (delayMs > 0) await sleep(delayMs);
+      if (stepDelay > 0) await sleep(stepDelay);
     }
+    el.dispatchEvent(new Event("input", { bubbles: true, composed: true }));
+    el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+    el.dispatchEvent(new FocusEvent("blur", { bubbles: true, composed: true }));
+    return true;
 
     el.dispatchEvent(new Event("change", { bubbles: true }));
     return true;
@@ -947,6 +889,9 @@
       "ef-activity-navigator .wp",
       "[draggable='true']",
       ".draggable",
+      ".cdk-drag",
+      "[cdkdrag]",
+      "ef-sequencing-sort-column-item",
       "[data-rbd-draggable-id]",
       "[data-rbd-droppable-id]",
       "[data-testid]",
@@ -1202,9 +1147,13 @@
       else if (
         cls.includes("next-task-button") ||
         cls.includes("self-evaluation-submit") ||
-        /^(next|start next step|continue|submit|check|proceed|done|finish|start lesson|try again|back to lesson overview|return to unit overview|generate feedback|далее|продолжить|проверить|готово)$/i.test(
-          rawText
-        )
+        ((tag === "button" || role === "button" || cls.includes("button") || cls.includes("btn") || el.hasAttribute("onclick")) &&
+          !cls.includes("target-word") &&
+          !cls.includes("word") &&
+          !cls.includes("flip-btn") &&
+          /^(next|start next step|continue|submit|check|proceed|done|finish|start lesson|try again|back to lesson overview|return to unit overview|generate feedback|далее|продолжить|проверить|готово)$/i.test(
+            rawText
+          ))
       ) {
         type = "next_btn";
         prefix = "next";
@@ -1233,29 +1182,37 @@
         type = "stage_nav";
         prefix = "stage";
       }
-      // 10. Draggable tokens / cards
+      // 10. Draggable tokens / cards (excluding passive study flashcards)
       else if (
-        el.getAttribute("draggable") === "true" ||
-        el.hasAttribute("data-rbd-draggable-id") ||
-        cls.includes("draggable") ||
-        cls.includes("word-chip") ||
-        cls.includes("chip") ||
-        cls.includes("token") ||
-        (cls.includes("card") && !cls.includes("column") && rect.height < 180)
+        !cls.includes("flip-btn") &&
+        tag !== "ef-flashcard" &&
+        !cls.includes("flashcard") &&
+        tag !== "ef-sequencing-sort-column-item" &&
+        !(el.closest && el.closest("ef-flashcards-task, .flashcard-wp")) &&
+        (el.getAttribute("draggable") === "true" ||
+          el.hasAttribute("data-rbd-draggable-id") ||
+          el.hasAttribute("cdkdrag") ||
+          cls.includes("cdk-drag") ||
+          cls.includes("draggable") ||
+          cls.includes("word-chip") ||
+          cls.includes("chip") ||
+          cls.includes("token") ||
+          (cls.includes("card") && !cls.includes("column") && rect.height < 180))
       ) {
         type = "draggable";
         prefix = "item";
       }
       // 11. Drop slots / blanks / columns
       else if (
-        el.hasAttribute("data-rbd-droppable-id") ||
-        cls.includes("slot") ||
-        cls.includes("blank") ||
-        (/\b(gap|fill-gap)\b/.test(cls) && !cls.includes("gap-b2s")) ||
-        cls.includes("drop") ||
-        cls.includes("column") ||
-        cls.includes("category") ||
-        cls.includes("bucket")
+        !(el.closest && el.closest("ef-sequencing-task") && (cls.includes("drop-list") || cls.includes("cdk-drop-list"))) &&
+        (el.hasAttribute("data-rbd-droppable-id") ||
+          cls.includes("slot") ||
+          cls.includes("blank") ||
+          (/\b(gap|fill-gap)\b/.test(cls) && !cls.includes("gap-b2s")) ||
+          cls.includes("drop") ||
+          cls.includes("column") ||
+          cls.includes("category") ||
+          cls.includes("bucket"))
       ) {
         type = "drop_target";
         prefix = "slot";
@@ -1300,6 +1257,14 @@
         }
       }
 
+      // Image cards (picture-matching tasks) have no visible text: describe them via aria-label / <img alt>
+      if (!finalText) {
+        const aria = (el.getAttribute("aria-label") || "").trim();
+        const imgEl = el.querySelector && el.querySelector("img[alt]");
+        const desc = aria || (imgEl ? (imgEl.getAttribute("alt") || "").trim() : "");
+        if (desc) finalText = `[image] ${desc.replace(/^image of\s+/i, "")}`.slice(0, 110);
+      }
+
       const id = `${prefix}-${counters[prefix]++}`;
       el.setAttribute("data-efekta-id", id);
       elementRegistry.set(id, el);
@@ -1317,7 +1282,8 @@
       let disabled =
         el.disabled === true ||
         el.getAttribute("aria-disabled") === "true" ||
-        cls.includes("disabled");
+        // "mat-mdc-tooltip-disabled" only means "no tooltip", NOT "control disabled"
+        cls.replace(/mat-mdc-tooltip-disabled/g, "").includes("disabled");
       if (type !== "mic_btn") {
         disabled = disabled || cls.includes("no-pointer");
       }
@@ -1570,10 +1536,28 @@
       exerciseType = "categorize_columns";
       actionTemplate = `efekta batch "sort slot-1:item-1,item-2; sort slot-2:item-3,item-4; next" --json -c`;
       summary = `Sort ${dragEls.length} items into ${slotEls.length} categories in one batch, ending with '; next'.`;
+    } else if (hasMatchingCards && slotEls.length === 0 && dragEls.length >= 4) {
+      // "Tap to match the pairs": every card (image or word) is an item; pair them with item-A:item-B
+      exerciseType = "matching_pairs";
+      const sug = suggestImageWordPairs(dragEls);
+      if (sug) {
+        actionTemplate = `efekta batch "pair ${sug.pairs.map((p) => `${p.img}:${p.word}`).join(", ")}; next" --json -c`;
+        summary = `Tap-to-match (image cards described as 'Image of ...'). Program-suggested pairs ${sug.confident ? "(confident - just run it)" : `(PARTLY GUESSED: verify ${sug.uncertain.join(", ")})`}: ${sug.pairs.map((p) => `${p.img}=${p.word}`).join(" ")}.`;
+      } else {
+        actionTemplate = `efekta batch "pair item-1:item-7, item-2:item-8, ...; next" --json -c`;
+        summary = `Tap-to-match: ${dragEls.length} cards. Pair each image card with its word card using 'pair item-A:item-B, ...; next'.`;
+      }
     } else if (dragEls.length > 0) {
-      exerciseType = "order_sentence";
-      actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json -c`;
-      summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
+      const hasSequencing = getAllDocs().some((d) => d.querySelector("ef-sequencing-task, [class*='sequencing']"));
+      if (hasSequencing) {
+        exerciseType = "order_dialogue";
+        actionTemplate = `efekta batch "drag item-1 item-2; next" --json -c`;
+        summary = `Dialogue/sequence reordering task (${dragEls.length} items). Drag items into the correct order, ending with '; next'.`;
+      } else {
+        exerciseType = "order_sentence";
+        actionTemplate = `efekta batch "pick item-1,item-2,item-3; next" --json -c`;
+        summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
+      }
     } else if (choiceEls.length >= 2) {
       exerciseType = "multiple_choice";
       actionTemplate = `efekta batch "pick opt-1; next" --json -c`;
@@ -2127,8 +2111,12 @@
       ) {
         return false;
       }
-      // If end-of-activity summary is shown, it's a passive screen!
+      // Passive study flashcards (ef-flashcards-task) are not interactive exercises!
       const docs = getAllDocs();
+      if (docs.some((d) => d.querySelector("ef-flashcards-task"))) {
+        return false;
+      }
+      // If end-of-activity summary is shown, it's a passive screen!
       if (
         docs.some((d) =>
           d.querySelector(
@@ -2159,6 +2147,17 @@
       await waitUntilUnlocked(1500);
       const st = inspectState();
 
+      // Avatar dialogue: NEVER fast-forward (seeking its video skips every question). Hand over to `dialogue`.
+      if (isAvatarContext(st) && !isSummaryVisible() && !(step === 0 && st.canProceed && st.exerciseType !== "speaking_avatar")) {
+        return {
+          success: true,
+          message: "Avatar dialogue detected - run 'efekta dialogue' (answers every turn automatically).",
+          hops,
+          autoReadNotes,
+          needsDialogue: true
+        };
+      }
+
       // On step > 0, stop immediately as soon as we land on an interactive exercise!
       if (step > 0 && isInteractiveExercise(st)) {
         await autoPeekSelectionGapOptions(st);
@@ -2183,8 +2182,15 @@
 
       let clickedTarget = "";
 
-      // Priority 0.5: Fast-forward passive video stage if video is blocking Next button
-      if (!st.canProceed && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo && !st.video.ended))) {
+      // Priority 0.5: Fast-forward passive video stage if video is blocking Next button (never avatar dialogues or interactive tasks!)
+      const isInteractiveTask =
+        st.exerciseType === "speaking_avatar" ||
+        st.exerciseType === "speaking_practice" ||
+        (st.agentHint && st.agentHint.options && st.agentHint.options.length > 0) ||
+        (st.agentHint && st.agentHint.slots && st.agentHint.slots.length > 0) ||
+        (st.agentHint && st.agentHint.items && st.agentHint.items.length > 0);
+
+      if (!st.canProceed && !isInteractiveTask && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo && !st.video.ended))) {
         const docs = getAllDocs();
         let seeked = false;
         for (const doc of docs) {
@@ -2576,8 +2582,8 @@
         };
       }
 
-      // Click microphone button once to start recording
-      await simulateClick(micEl);
+      // Click microphone button to start recording (runs directly in main page JS world)
+      await callVoiceBridge({ type: "click", selector: "button.audio-recorder-btn" });
       log.push(`Started speaking (${preparedClip.source}, ${clipDurMs}ms)...`);
 
       // Wait while phrase plays into Efekta's audio stream
@@ -2599,22 +2605,37 @@
       }
 
       // Ensure recording is stopped so Efekta submits audio to ASR
-      await sleep(300);
-      let isRecording = false;
-      let recBtn = null;
-      for (const doc of getAllDocs()) {
-        const ctrl = doc.querySelector(
-          ".speech-action-control.recording, button.audio-recorder-btn [aria-label*='Recording' i], ef-svg-stop"
-        );
-        if (ctrl) {
-          isRecording = true;
-          recBtn = ctrl.closest("button.audio-recorder-btn, [data-qa='audio-record-or-play']") || ctrl;
-          break;
+      await sleep(250);
+      if (!stoppedAutomatically) {
+        let isRecording = false;
+        let recBtn = null;
+        for (const doc of getAllDocs()) {
+          const btns = Array.from(
+            doc.querySelectorAll("button.audio-recorder-btn, [data-qa='audio-record-or-play']")
+          );
+          for (const b of btns) {
+            const aria = (b.getAttribute("aria-label") || "").toLowerCase();
+            const txt = (b.innerText || "").toLowerCase();
+            const cls = (b.className || "").toLowerCase();
+            if (
+              aria.includes("recording") ||
+              txt.includes("recording") ||
+              cls.includes("recording") ||
+              b.querySelector(".recording, ef-svg-stop")
+            ) {
+              isRecording = true;
+              recBtn = b;
+              break;
+            }
+          }
+          if (recBtn) break;
         }
-      }
-      if (isRecording && recBtn) {
-        await simulateClick(recBtn);
-        log.push("Clicked mic button once to stop recording");
+        if (isRecording && recBtn) {
+          await callVoiceBridge({ type: "click", selector: "button.audio-recorder-btn" });
+          log.push("Clicked mic button once to stop recording");
+        }
+      } else {
+        log.push("Recording stopped automatically by page");
       }
 
       // Wait up to 6.5s for Efekta ASR grading to complete
@@ -2663,7 +2684,7 @@
       };
     } finally {
       // ALWAYS disarm so the user's real physical microphone works normally afterward!
-      await callVoiceBridge({ type: "disarm", closeSession: false });
+      await callVoiceBridge({ type: "disarm", closeSession: true });
     }
   }
 
@@ -2730,14 +2751,14 @@
     };
   }
 
-  // Solver 1: Multiple Choice Brute-Forcer
-  async function solveMultipleChoice(delayMs = 140) {
+  // Solver 1: Multiple Choice Smart Solver (Single & Multi-Select with Instant Incorrect Abort)
+  async function solveMultipleChoice(delayMs = 100) {
     await dismissOverlaysIfPresent();
     const initialState = inspectState();
     let candidateMeta = initialState.elements.filter((e) => e.type === "choice" && !e.disabled);
     if (candidateMeta.length === 0) {
       candidateMeta = initialState.elements.filter(
-        (e) => e.type === "button" && !e.disabled && e.text.length > 0
+        (e) => e.type === "button" && !e.disabled && e.text.length > 0 && e.type !== "next_btn"
       );
     }
 
@@ -2745,22 +2766,35 @@
       return { success: false, message: "No clickable choice options found on page" };
     }
 
-    const candidates = candidateMeta
-      .map((meta) => ({ meta, domEl: resolveElement(meta.id), text: meta.text }))
-      .filter((item) => item.domEl !== null);
+    // Deduplicate candidate options by text
+    const seenTexts = new Set();
+    const candidates = [];
+    for (const meta of candidateMeta) {
+      const clean = (meta.text || "").trim().toLowerCase();
+      if (clean && !seenTexts.has(clean)) {
+        seenTexts.add(clean);
+        candidates.push({ meta, domEl: resolveElement(meta.id), text: meta.text });
+      }
+    }
 
     const clicked = [];
     for (const { meta, domEl, text } of candidates) {
-      await waitUntilUnlocked(1500);
-      const targetEl = domEl.isConnected ? domEl : findInteractiveByText(text);
+      await waitUntilUnlocked(1200);
+      const targetEl = (domEl && domEl.isConnected) ? domEl : findInteractiveByText(text);
       if (!targetEl) continue;
+
+      // If already selected and marked correct, keep it
+      if (targetEl.classList.contains("correct") || (targetEl.closest && targetEl.closest(".correct"))) {
+        continue;
+      }
+
       await simulateClick(targetEl);
       clicked.push(`${meta.id} ("${text}")`);
 
-      // Poll up to 320ms for canProceed to unlock
+      // Fast-poll: abort immediately if marked incorrect (within 30-50ms)!
       const waitStart = Date.now();
-      while (Date.now() - waitStart < Math.max(delayMs, 260)) {
-        await sleep(45);
+      while (Date.now() - waitStart < Math.max(delayMs, 220)) {
+        await sleep(30);
         const checkSt = inspectState();
         if (checkSt.canProceed && !checkSt.feedback.startsWith("incorrect")) {
           return {
@@ -2770,31 +2804,52 @@
             clicked
           };
         }
+
+        const elNow = resolveElement(meta.id) || targetEl;
+        const hasIncClass = elNow && (
+          elNow.classList.contains("incorrect") ||
+          (elNow.closest && elNow.closest(".incorrect")) ||
+          (elNow.querySelector && elNow.querySelector(".incorrect"))
+        );
+        if (hasIncClass || (checkSt.feedback && checkSt.feedback.startsWith("incorrect"))) {
+          // In multi-select checkboxes, deselect the wrong option so it doesn't block progress
+          if (elNow.classList.contains("is-selected") || elNow.getAttribute("aria-checked") === "true") {
+            await simulateClick(elNow);
+            await sleep(40);
+          }
+          break; // break immediately to next candidate!
+        }
+
+        const hasCorClass = elNow && (
+          elNow.classList.contains("correct") ||
+          (elNow.closest && elNow.closest(".correct"))
+        );
+        if (hasCorClass) {
+          // Option is correct! In multi-select, keep it selected and proceed to test next
+          break;
+        }
       }
 
+      // Check if a Check/Submit button appeared and needs clicking
       const curState = inspectState();
       const checkBtn = curState.elements.find(
-        (e) =>
-          e.type === "next_btn" &&
-          !e.disabled &&
-          /\b(check|submit|проверить)\b/i.test(e.text)
+        (e) => e.type === "next_btn" && !e.disabled && /\b(check|submit|проверить)\b/i.test(e.text)
       );
       if (checkBtn) {
         const checkEl = resolveElement(checkBtn.id);
         if (checkEl) {
           await simulateClick(checkEl);
-          await sleep(delayMs);
+          await sleep(60);
+          const afterCheck = inspectState();
+          if (afterCheck.canProceed && !afterCheck.feedback.startsWith("incorrect")) {
+            return {
+              success: true,
+              message: `Unlocked progression with ${meta.id} ("${text}")`,
+              nextButtonId: afterCheck.nextButtonId,
+              clicked
+            };
+          }
         }
-      }
-
-      const afterCheck = inspectState();
-      if (afterCheck.canProceed && !afterCheck.feedback.startsWith("incorrect")) {
-        return {
-          success: true,
-          message: `Unlocked progression with ${meta.id} ("${text}")`,
-          nextButtonId: afterCheck.nextButtonId,
-          clicked
-        };
       }
     }
 
@@ -2802,9 +2857,35 @@
     return {
       success: finalState.canProceed,
       message: finalState.canProceed
-        ? "Completed options and unlocked next"
-        : "Clicked all options; inspect state for multi-select or next button",
+        ? "Completed options and unlocked progression"
+        : "Tested choice options; inspect state for multi-select",
       clicked
+    };
+  }
+
+  // Skip all phrases of a pronunciation drill in 1 shot
+  async function executeSkipDrill() {
+    let skipped = 0;
+    const t0 = Date.now();
+    for (let guard = 0; guard < 20 && Date.now() - t0 < 15000; guard++) {
+      await dismissOverlaysIfPresent();
+      await waitUntilUnlocked(1000);
+      const st = inspectState();
+      if (st.exerciseType !== "speaking_practice") break;
+      const skipBtnMeta = st.elements.find((e) => e.type === "skip_btn" && !e.disabled);
+      if (!skipBtnMeta) break;
+      const skipEl = resolveElement(skipBtnMeta.id);
+      if (!skipEl) break;
+      await simulateClick(skipEl);
+      skipped++;
+      await sleep(150);
+    }
+    const nextRes = await executeAutoNext(9);
+    return {
+      success: true,
+      message: `Skipped ${skipped} pronunciation drill phrase(s) and advanced (${nextRes.message})`,
+      skipped,
+      nextResult: nextRes
     };
   }
 
@@ -2899,6 +2980,369 @@
   }
 
   // Execute single action object (used by both direct messages and batch runner)
+  // ==========================================================================================
+  // v3.1 ENGINE: avatar-aware helpers, `dialogue` macro and `autopilot` macro
+  // ==========================================================================================
+  let avatarStickyAt = 0;
+
+  // Suggest image<->word pairs for "Tap to match the pairs" tasks by comparing image descriptions with the word cards
+  function suggestImageWordPairs(cards) {
+    const imgs = cards.filter((c) => /^(\[image\]|image of)/i.test(c.text || ""));
+    const words = cards.filter((c) => !/^(\[image\]|image of)/i.test(c.text || ""));
+    if (imgs.length === 0 || imgs.length !== words.length) return null;
+    const stems = (t) =>
+      new Set(
+        String(t).toLowerCase().split(/[^a-z]+/).filter((w) => w.length >= 3).map((w) => w.slice(0, 4))
+      );
+    const cand = [];
+    for (const im of imgs) {
+      const is = stems(im.text);
+      for (const w of words) {
+        let sc = 0;
+        for (const st of stems(w.text)) if (is.has(st)) sc++;
+        cand.push({ img: im.id, word: w.id, sc });
+      }
+    }
+    cand.sort((a, b) => b.sc - a.sc);
+    const usedI = new Set();
+    const usedW = new Set();
+    const pairs = [];
+    const uncertain = [];
+    for (const c of cand) {
+      if (c.sc > 0 && !usedI.has(c.img) && !usedW.has(c.word)) {
+        pairs.push({ img: c.img, word: c.word });
+        usedI.add(c.img);
+        usedW.add(c.word);
+      }
+    }
+    const leftI = imgs.filter((i) => !usedI.has(i.id));
+    const leftW = words.filter((w) => !usedW.has(w.id));
+    leftI.forEach((im, k) => {
+      pairs.push({ img: im.id, word: leftW[k].id });
+      if (leftI.length > 1) uncertain.push(`${im.id}=${leftW[k].id}`);
+    });
+    pairs.sort((a, b) => Number(a.img.slice(5)) - Number(b.img.slice(5)));
+    return { pairs, confident: uncertain.length === 0, uncertain };
+  }
+
+  function isSummaryVisible() {
+    return getAllDocs().some((d) => {
+      const el = d.querySelector(
+        "ef-end-of-activity-summary, .tasks-wp.summary-shown, .summary-wp, .summary-shown"
+      );
+      return el && isVisible(el);
+    });
+  }
+
+  function findFinishSkippedButton() {
+    for (const doc of getAllDocs()) {
+      const btns = Array.from(doc.querySelectorAll("button")).filter(isVisible);
+      const b = btns.find((x) => /finish skipped/i.test(cleanText(x)));
+      if (b) return b;
+    }
+    return null;
+  }
+
+  // Parse the "Correct answers: 6 / 8 ... Activity: Passed|Not passed [Next] [Finish skipped tasks]" screen
+  function summaryInfo() {
+    const globalFinish = findFinishSkippedButton();
+    for (const doc of getAllDocs()) {
+      const el = doc.querySelector("ef-end-of-activity-summary");
+      if (el && isVisible(el)) {
+        const txt = cleanText(el);
+        const m = txt.match(/Correct answers:\s*(\d+)\s*\/\s*(\d+)/i);
+        const btns = Array.from(el.querySelectorAll("button")).filter(isVisible);
+        return {
+          text: txt.slice(0, 200),
+          correct: m ? Number(m[1]) : null,
+          total: m ? Number(m[2]) : null,
+          notPassed: /not passed/i.test(txt),
+          passed: /activity:\s*passed/i.test(txt),
+          finishSkipped: globalFinish || btns.find((b) => /finish skipped/i.test(cleanText(b))) || null,
+          nextBtn: btns.find((b) => /^next$/i.test(cleanText(b))) || null
+        };
+      }
+    }
+    if (globalFinish) {
+      return {
+        text: "Finish skipped tasks available",
+        correct: null,
+        total: null,
+        notPassed: true,
+        passed: false,
+        finishSkipped: globalFinish,
+        nextBtn: null
+      };
+    }
+    return null;
+  }
+
+  // True while we are inside an avatar dialogue activity (even during the avatar video between questions).
+  // `next` must NEVER seek the video there - seeking skips every question and fails the step.
+  function isAvatarContext(st) {
+    if (isSummaryVisible()) {
+      avatarStickyAt = 0;
+      return false;
+    }
+    st = st || inspectState();
+    if (st.exerciseType === "lesson_overview") {
+      avatarStickyAt = 0;
+      return false;
+    }
+    const hit =
+      st.exerciseType === "speaking_avatar" ||
+      getAllDocs().some((d) => d.querySelector("ef-multiple-choice-speech-task")) ||
+      /respond when you are prompted/i.test(`${(st.contextText || []).join(" ")} ${st.prompt || ""}`);
+    if (hit) avatarStickyAt = Date.now();
+    return hit || (Date.now() - avatarStickyAt < 60000 && st.exerciseType === "video_stage");
+  }
+
+  function parseDialogueOptions(st) {
+    const raw = (st.agentHint && st.agentHint.options) || [];
+    const out = [];
+    for (const line of raw) {
+      const m = String(line).match(/^(opt-\d+):\s*(?:([A-Za-z])[:.)]\s*)?(.*)$/);
+      if (m) {
+        out.push({ id: m[1], letter: (m[2] || "").toUpperCase(), text: (m[3] || line).trim() });
+      }
+    }
+    return out;
+  }
+
+  const DIALOGUE_GOOD = [
+    /let me (make sure|check|get this straight|confirm)/, /you mean/, /don'?t worry/, /\bi can\b/,
+    /no problem|not a problem/, /i'?m sure/, /that'?s (correct|right)/, /exactly/, /actually/,
+    /i understand/, /could you|would you/, /i'?d like/, /sounds good|that works/, /how about|what about/,
+    /shall we/, /i suggest|i recommend/, /to sum up|in summary|to summarize/, /thank/, /\byes\b/,
+    /all right|great|good idea|of course|certainly/
+  ];
+  const DIALOGUE_BAD = [
+    /can'?t|cannot/, /not sure i/, /\bnever\b/, /huge problem|so many problems/, /don'?t know/,
+    /unfortunately|afraid|sorry, i/, /i give up|forget it/
+  ];
+
+  // Heuristic: scenario keyword overlap + functional-language phrases - negativity
+  function scoreDialogueOption(text, scenario) {
+    const t = text.toLowerCase();
+    let s = 0;
+    for (const re of DIALOGUE_GOOD) if (re.test(t)) s += 2;
+    for (const re of DIALOGUE_BAD) if (re.test(t)) s -= 3;
+    const words = new Set(
+      String(scenario || "").toLowerCase().split(/[^a-z']+/).filter((w) => w.length > 3)
+    );
+    for (const w of t.split(/[^a-z']+/)) if (w.length > 3 && words.has(w)) s += 1;
+    return s;
+  }
+
+  function findSkipButtonEl() {
+    const st = inspectState();
+    const meta = st.elements.find((e) => e.type === "skip_btn" && !e.disabled);
+    return meta ? resolveElement(meta.id) : null;
+  }
+
+  // `dialogue [picks] [once]` - answers ALL avatar turns in one command:
+  // [click "Okay, got it"] -> wait for options -> speak option -> Next -> wait for next options ... -> summary.
+  // picks: comma/space separated per-turn choices (opt-2 | B | text); missing picks use a heuristic.
+  async function executeDialogue(spec = "") {
+    const tokens = String(spec || "").split(/[\s,]+/).filter(Boolean);
+    const once = tokens.some((t) => /^(once|one|1turn)$/i.test(t));
+    const picks = tokens.filter((t) => !/^(once|one|1turn|auto|all)$/i.test(t));
+    const turns = [];
+    let scenario = "";
+    let retries = 0;
+    const t0 = Date.now();
+
+    for (let guard = 0; guard < 60 && Date.now() - t0 < 270000; guard++) {
+      await dismissOverlaysIfPresent();
+
+      // End-of-activity summary
+      const sum = summaryInfo();
+      if (sum) {
+        if (sum.notPassed && sum.finishSkipped) {
+          await simulateClick(sum.finishSkipped);
+          await sleep(800);
+          continue; // skipped questions come back one by one
+        }
+        return {
+          success: sum.passed || !sum.notPassed,
+          finished: true,
+          message: `Dialogue finished: ${sum.correct}/${sum.total} correct, ${sum.passed ? "PASSED" : sum.notPassed ? "NOT passed" : "done"}. Run 'next' to continue.`,
+          turns,
+          summary: sum.text
+        };
+      }
+
+      const st = inspectState();
+      const opts = parseDialogueOptions(st);
+      const media = getMediaStatus();
+      if (!scenario && st.contextText && st.contextText.length) scenario = st.contextText.join(" ");
+
+      // Instruction screen / leftover Next button with no question on screen
+      if (opts.length === 0 && st.canProceed && st.nextButtonId && !media.isPlaying) {
+        const b = resolveElement(st.nextButtonId);
+        if (b) await simulateClick(b);
+        await sleep(350);
+        continue;
+      }
+
+      // Wait for the avatar to finish speaking and the options to become answerable
+      if (opts.length === 0 || media.isPlaying || st.canProceed) {
+        await sleep(150);
+        continue;
+      }
+
+      // Pick option for this turn
+      const want = picks[turns.length];
+      let choice = null;
+      if (want) {
+        const w = want.toLowerCase();
+        choice =
+          opts.find((o) => o.id.toLowerCase() === w) ||
+          opts.find((o) => o.letter && o.letter.toLowerCase() === w) ||
+          (/^\d+$/.test(w) ? opts[Number(w) - 1] : null) ||
+          opts.find((o) => o.text.toLowerCase().includes(w)) ||
+          null;
+      }
+      let how = "pick";
+      if (!choice) {
+        how = "heuristic";
+        choice = opts
+          .map((o) => ({ o, s: scoreDialogueOption(o.text, scenario) }))
+          .sort((a, b) => b.s - a.s)[0].o;
+      }
+
+      const hasMic = st.elements.some((e) => e.type === "mic_btn");
+      let res = null;
+      if (hasMic) {
+        res = await speakSinglePhrase(choice.id);
+      } else {
+        const choiceEl = resolveElement(choice.id) || findInteractiveByText(choice.text);
+        if (choiceEl) {
+          await simulateClick(choiceEl);
+          await sleep(140);
+          res = { success: true, message: `Tapped choice: ${choice.text}` };
+        } else {
+          res = await solveMultipleChoice(80);
+        }
+      }
+      const after = inspectState();
+      if (!(res.success || after.canProceed)) {
+        if (++retries > 2) {
+          return {
+            success: false,
+            message: `Dialogue stopped: speech was not accepted after retries (${res.error || res.message || "unknown"}). Try 'speak ${choice.id}' manually.`,
+            turns
+          };
+        }
+        continue;
+      }
+      retries = 0;
+      turns.push({ turn: turns.length + 1, option: `${choice.id} ${choice.letter}`.trim(), text: choice.text, how });
+
+      if (after.canProceed && after.nextButtonId) {
+        const b = resolveElement(after.nextButtonId);
+        if (b) await simulateClick(b);
+      }
+      if (once) {
+        return { success: true, message: `Answered turn ${turns.length}: "${choice.text}"`, turns };
+      }
+      await sleep(350);
+    }
+    return { success: false, message: "Dialogue timed out", turns };
+  }
+
+  // `autopilot [maxSteps] [speak]` - drives EVERYTHING that needs no answer knowledge:
+  // lesson overview / passive / video / summaries / self-evaluation / avatar dialogues / optional pronunciation drills.
+  // Stops (needsAgent:true) on the first exercise that needs a real answer and returns its agentHint.
+  async function executeAutopilot(spec = "") {
+    const tokens = String(spec || "").split(/\s+/).filter(Boolean);
+    const speakDrills = tokens.some((t) => /^speak$/i.test(t));
+    const maxSteps = Number(tokens.find((t) => /^\d+$/.test(t))) || 40;
+    const steps = [];
+    const notes = [];
+    let lastSig = "";
+    let same = 0;
+    let emptyWaits = 0;
+    const t0 = Date.now();
+
+    const finish = (extra) => ({
+      success: true,
+      steps,
+      autoReadNotes: notes,
+      ...extra
+    });
+
+    for (let i = 0; i < maxSteps && Date.now() - t0 < 270000; i++) {
+      const st = inspectState();
+      const sig = `${st.url}|${st.exerciseType}|${st.prompt}|${(st.contextText || []).join("|")}|${st.canProceed}`;
+      same = sig === lastSig ? same + 1 : 0;
+      lastSig = sig;
+      if (same >= 3) {
+        return finish({ needsAgent: true, stoppedAt: st.exerciseType, message: "Autopilot made no progress - look at agentHint." });
+      }
+
+      if (st.exerciseType === "unknown" && (st.elementsCount || 0) === 0 && emptyWaits++ < 8) {
+        await sleep(400);
+        continue;
+      }
+      emptyWaits = 0;
+
+      if (isAvatarContext(st)) {
+        const r = await executeDialogue("");
+        steps.push(`dialogue: ${r.message}`);
+        if (!r.success) return finish({ success: false, needsAgent: true, stoppedAt: "speaking_avatar", message: r.message });
+        continue;
+      }
+
+      const t = st.exerciseType;
+      if (t === "speaking_practice") {
+        const skip = !speakDrills ? findSkipButtonEl() : null;
+        if (skip) {
+          const sRes = await executeSkipDrill();
+          steps.push(sRes.message);
+          continue;
+        } else {
+          const r = await executeSpeak("all");
+          steps.push(`spoke drill: ${r.message || r.error || ""}`);
+        }
+        const n = await executeAutoNext(9);
+        (n.autoReadNotes || []).forEach((x) => notes.push(x));
+        continue;
+      }
+
+      if (t === "multiple_choice") {
+        const sol = await solveMultipleChoice(80);
+        steps.push(`solved multiple choice: ${sol.message}`);
+        if (sol.success) {
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (isInteractiveExercise(st)) {
+        return finish({
+          needsAgent: true,
+          stoppedAt: t,
+          message: `Needs your answer: ${t}. Use agentHint.actionTemplate, then run 'autopilot' again (or end the batch with '; auto').`
+        });
+      }
+
+      if (t === "unknown" && !st.canProceed) {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "unknown",
+          message: "Not inside a lesson (dashboard or unknown page). Pick a lesson with 'click slot-N' and run 'autopilot' again."
+        });
+      }
+
+      const n = await executeAutoNext(9);
+      steps.push(`next: ${n.message}`);
+      (n.autoReadNotes || []).forEach((x) => notes.push(x));
+    }
+    return finish({ needsAgent: false, message: "Autopilot step budget reached - run 'autopilot' again to continue." });
+  }
+
   async function executeSingleCommand(cmd) {
     const action = (cmd.action || "").toLowerCase();
     switch (action) {
@@ -2922,6 +3366,9 @@
       case "gaps":
       case "fill": {
         return await executeGaps(cmd.target || cmd.text);
+      }
+      case "skip": {
+        return await executeSkipDrill();
       }
       case "seek": {
         const docs = getAllDocs();
@@ -2960,6 +3407,14 @@
       case "next":
       case "ff": {
         return await executeAutoNext(cmd.amount || 9);
+      }
+      case "dialogue":
+      case "avatar": {
+        return await executeDialogue(cmd.target || cmd.text || "");
+      }
+      case "auto":
+      case "autopilot": {
+        return await executeAutopilot(cmd.target || cmd.text || "");
       }
       case "drag": {
         await waitUntilUnlocked(1500);
@@ -3042,6 +3497,8 @@
                 id: el.getAttribute("data-efekta-id") || el.id || "",
                 className: el.className || "",
                 text: cleanText(el),
+                value: el.value !== undefined ? el.value : "",
+                parent: el.parentElement ? el.parentElement.tagName.toLowerCase() + " " + el.parentElement.className : "",
                 visible: isVisible(el),
                 display: cs.display,
                 cursor: cs.cursor,

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"efekta-cli/pkg/protocol"
 )
@@ -165,6 +166,29 @@ func getToolDefinitions() []map[string]interface{} {
 						"type":        "boolean",
 						"description": "Strip verbose coordinate dump to save 80% tokens (default: true)",
 					},
+				},
+			},
+		},
+		{
+			"name":        "efekta_autopilot",
+			"description": "BEST FIRST CHOICE inside a lesson. Drives everything that needs no answer knowledge in ONE call: lesson overview, reading cards, videos, summaries, self-evaluation, whole avatar dialogues, optional pronunciation drills (skipped unless speak=true). Stops with needsAgent=true and an agentHint at the first exercise that needs a real answer (multiple choice, matching, gaps, ordering...). After answering, call it again (or end a batch with '; auto').",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"maxSteps": map[string]interface{}{"type": "integer", "description": "Step budget (default 40)"},
+					"speak":    map[string]interface{}{"type": "boolean", "description": "Really speak pronunciation drills instead of skipping optional ones"},
+					"compact":  map[string]interface{}{"type": "boolean", "description": "Strip coordinate dump (default: true)"},
+				},
+			},
+		},
+		{
+			"name":        "efekta_dialogue",
+			"description": "Answer an AI-avatar dialogue (options A/B/C) end to end: waits for the avatar, speaks the chosen option via the Voice Engine, clicks Next, repeats for every turn, handles 'Finish skipped tasks'. Optional picks choose per-turn options (e.g. 'B,C,A' or 'opt-2,opt-1'); turns without a pick use a heuristic. Add 'once' to answer a single turn and read the next options first.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"picks":   map[string]interface{}{"type": "string", "description": "Per-turn choices, e.g. 'B,C,A' (optional). Append ' once' for one turn only."},
+					"compact": map[string]interface{}{"type": "boolean", "description": "Strip coordinate dump (default: true)"},
 				},
 			},
 		},
@@ -350,6 +374,17 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		cmd = protocol.Command{Action: "status"}
 	case "efekta_next":
 		cmd = protocol.Command{Action: "next"}
+	case "efekta_autopilot":
+		t := ""
+		if n, ok := params.Arguments["maxSteps"].(float64); ok && n > 0 {
+			t = strconv.Itoa(int(n))
+		}
+		if b, ok := params.Arguments["speak"].(bool); ok && b {
+			t = strings.TrimSpace(t + " speak")
+		}
+		cmd = protocol.Command{Action: "autopilot", Target: t}
+	case "efekta_dialogue":
+		cmd = protocol.Command{Action: "dialogue", Target: strArg("picks")}
 	case "efekta_click":
 		cmd = protocol.Command{Action: "click", Target: strArg("target")}
 	case "efekta_drag":

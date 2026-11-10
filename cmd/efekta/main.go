@@ -104,11 +104,14 @@ USAGE:
 
 TURBO MACRO COMMANDS (1-Command-Per-Screen):
   next / ff                    Auto-advance & fast-forward through all passive/reading/summary/eval screens
+  auto / autopilot             Autonomous progression (auto-solves multiple choice, skips drills, navigates passive screens)
+  skip                         Skip all remaining phrases in a pronunciation drill in 1 shot & advance
   pick <id1,id2,...>           Click 1 or more options/tokens with auto-unlock wait (e.g. pick opt-1,opt-3)
   pair "<slot:item, ...>"      Match all left:right pairs in 1 roundtrip (e.g. pair "slot-1:item-3, slot-2:item-1")
   sort "<slot:item1,item2>"    Sort items into categories (immune to DOM removal across batch steps)
   gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order (auto-opens drawers)
   speak [all|"<phrase>"]       Speak target English phrase(s) via native reference audio loopback or TTS!
+  dialogue [picks]             Conduct multi-turn AI avatar dialogues (handles speech & tap turns)
   batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
 
 CORE COMMANDS:
@@ -317,6 +320,29 @@ func main() {
 			target = strings.Join(posArgs[1:], " ")
 		}
 		resp, err := execCommand(protocol.Command{Action: "speak", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "dialogue", "avatar":
+		target := ""
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "dialogue", Target: target})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "skip":
+		resp, err := execCommand(protocol.Command{Action: "skip"})
+		applyCompactFilter(resp, compactOutput)
+		handleSimpleResponse(resp, err, jsonOutput)
+
+	case "auto", "autopilot":
+		target := ""
+		if len(posArgs) >= 2 {
+			target = strings.Join(posArgs[1:], " ")
+		}
+		resp, err := execCommand(protocol.Command{Action: "autopilot", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
 

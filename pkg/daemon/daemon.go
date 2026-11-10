@@ -234,11 +234,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	timeout := 25 * time.Second
-	switch cmd.Action {
-	case "speak", "skip_speaking", "solve_choice", "wait", "batch", "next", "sort", "pair", "gaps":
-		timeout = 60 * time.Second
-	}
+	timeout := CommandTimeout(cmd)
 
 	resp, err := s.SendCommand(cmd, timeout)
 	w.Header().Set("Content-Type", "application/json")
@@ -314,4 +310,23 @@ func (s *Server) Run() error {
 
 	log.Printf("[daemon] Efekta Bridge Daemon v2.0 started on http://127.0.0.1:%s", WsPort)
 	return server.ListenAndServe()
+}
+
+// CommandTimeout returns how long the daemon waits for the browser extension to answer a command.
+// Long-running macros (dialogue, autopilot) legitimately take minutes: every avatar turn plays video and speech.
+func CommandTimeout(cmd protocol.Command) time.Duration {
+	switch cmd.Action {
+	case "dialogue", "autopilot":
+		return 300 * time.Second
+	case "batch":
+		for _, sub := range cmd.Commands {
+			if sub.Action == "dialogue" || sub.Action == "autopilot" {
+				return 300 * time.Second
+			}
+		}
+		return 60 * time.Second
+	case "speak", "skip", "skip_speaking", "solve_choice", "wait", "next", "sort", "pair", "gaps":
+		return 60 * time.Second
+	}
+	return 25 * time.Second
 }

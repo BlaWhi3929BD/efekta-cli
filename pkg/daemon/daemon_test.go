@@ -179,3 +179,16 @@ func TestSplitTextChunks(t *testing.T) {
 		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
 	}
 }
+
+func TestCommandTimeoutLongMacros(t *testing.T) {
+	if got := CommandTimeout(protocol.Command{Action: "autopilot"}); got < 300*time.Second {
+		t.Errorf("autopilot timeout too short: %v", got)
+	}
+	batch := protocol.Command{Action: "batch", Commands: []protocol.BatchSubCommand{{Action: "pick"}, {Action: "dialogue"}}}
+	if got := CommandTimeout(batch); got < 300*time.Second {
+		t.Errorf("batch with dialogue timeout too short: %v", got)
+	}
+	if got := CommandTimeout(protocol.Command{Action: "status"}); got != 25*time.Second {
+		t.Errorf("status timeout should be 25s, got %v", got)
+	}
+}
