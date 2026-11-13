@@ -21,9 +21,9 @@ Open **PowerShell** and run:
 ```powershell
 git clone https://github.com/BlaWhi3929BD/efekta-cli.git
 cd efekta-cli
-.\install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
-*Tip: If you don't have Go installed, install it in 1 command: `winget install GoLang.Go`*
+*Tip: If you don't have Go installed, run `winget install GoLang.Go`, restart PowerShell so the updated `PATH` loads, and run the installer command above.*
 
 ---
 
@@ -62,6 +62,7 @@ Works in **Google Chrome, Microsoft Edge, Brave, Opera, Vivaldi, Firefox, and Ze
    - Example path: `C:\Users\YourName\efekta-cli\extension` (Windows) or `~/efekta-cli/extension` (macOS/Linux).
    - *(In Firefox/Zen: click "Load Temporary Add-on..." and choose `extension/manifest.json`)*.
 4. Pin the **Efekta** extension icon in your browser toolbar!
+   - **Microsoft Edge tip (Windows):** If Edge puts background tabs to sleep, add `learn.better.efekta.com` to **"Never put these sites to sleep"** in `edge://settings/system` so active lessons keep running uninterrupted.
 
 ---
 
@@ -172,6 +173,7 @@ If you ever want to check its status: `efekta daemon status`. To stop it: `efekt
   }
 }
 ```
+> **Windows Note:** If your MCP client was already running when you ran `install.ps1`, restart it completely so it picks up the new `PATH` — or set `"command"` to the full path `"C:\\Users\\<YourName>\\.local\\bin\\efekta.exe"`.
 
 ### Available MCP Tools
 
@@ -214,6 +216,13 @@ When interacting with the CLI, always pass `--json -c` for 80% smaller compact o
 | `order_sentence` (tap sequence) | `ef-sequencing-tap-option-task` | `efekta batch "sequence auto; next" --json -c` | `efekta_sequence(tokens="auto")` |
 | `order_sentence` (token picker) | Shuffled words in `items` | `efekta batch "pick item-3,item-1; next" --json -c` | `efekta_batch(commands="pick ...; next")` |
 | `order_dialogue` | Dialogue turns (`cdk-drag`) | `efekta batch "drag item-2 item-1; next" --json -c` | `efekta_batch(commands="drag ...; next")` |
+
+---
+
+## 🔧 Troubleshooting & Windows Notes
+
+- **Port `8765` conflict / daemon startup failure:** The CLI daemon listens on `127.0.0.1:8765` to match the browser extension. On Windows with Hyper-V/WSL2, dynamic port exclusions or another local service can occasionally block `8765`. Check the startup log `efekta-daemon.log` in `%TEMP%` (Windows) or `$TMPDIR` / `/tmp` (macOS/Linux), and stop conflicting processes with `efekta daemon stop`.
+- **Quoting in Windows `cmd.exe` vs PowerShell:** `cmd.exe` does not strip single quotes `'...'`, so prefer double quotes for commands like `efekta batch "pick opt-1; next"` (matching PowerShell/bash).
 
 ---
 
