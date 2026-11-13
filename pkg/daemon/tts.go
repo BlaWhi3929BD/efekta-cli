@@ -37,6 +37,7 @@ var (
 	ipv4HTTPClient = &http.Client{
 		Timeout: 6 * time.Second,
 		Transport: &http.Transport{
+			Proxy: http.ProxyFromEnvironment,
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				d := &net.Dialer{Timeout: 3 * time.Second, KeepAlive: 30 * time.Second}
 				conn, err := d.DialContext(ctx, "tcp4", addr)

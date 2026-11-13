@@ -394,7 +394,7 @@ func getToolDefinitions() []map[string]interface{} {
 				"properties": map[string]interface{}{
 					"outputPath": map[string]interface{}{
 						"type":        "string",
-						"description": "File path to save the PNG screenshot (default: /tmp/efekta_screenshot.png)",
+						"description": "File path to save the PNG screenshot (default: system temp directory / efekta_screenshot.png)",
 					},
 				},
 			},

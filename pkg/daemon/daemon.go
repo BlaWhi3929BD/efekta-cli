@@ -179,7 +179,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) SendCommand(cmd protocol.Command, timeout time.Duration) (*protocol.Response, error) {
 	client := s.selectActiveClient()
 	if client == nil {
-		return nil, fmt.Errorf("no browser extension connected. Load ~/Projects/efekta-cli/extension in your browser and open learn.better.efekta.com")
+		return nil, fmt.Errorf("no browser extension connected. Load the extension/ folder in your browser and open https://learn.better.efekta.com")
 	}
 
 	s.mu.Lock()

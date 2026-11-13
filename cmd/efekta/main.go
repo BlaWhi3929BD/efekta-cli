@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -35,6 +36,18 @@ func isDaemonRunning() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+func readDaemonLogTail(logPath string) string {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
 func ensureDaemon() error {
 	if isDaemonRunning() {
 		return nil
@@ -45,22 +58,51 @@ func ensureDaemon() error {
 		exePath = "efekta"
 	}
 
+	logPath := filepath.Join(os.TempDir(), "efekta-daemon.log")
+	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+
 	cmd := exec.Command(exePath, "daemon", "run")
 	cmd.Stdin = nil
 	cmd.Stdout = nil
-	cmd.Stderr = nil
+	if logErr == nil {
+		cmd.Stderr = logFile
+	} else {
+		cmd.Stderr = nil
+	}
 	configureBackgroundProcess(cmd)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to auto-start daemon: %w", err)
+	startErr := cmd.Start()
+	if logFile != nil {
+		_ = logFile.Close()
+	}
+	if startErr != nil {
+		return fmt.Errorf("failed to auto-start daemon: %w", startErr)
 	}
 
+	waitCh := make(chan error, 1)
+	go func() {
+		waitCh <- cmd.Wait()
+	}()
+
 	for i := 0; i < 20; i++ {
-		time.Sleep(100 * time.Millisecond)
-		if isDaemonRunning() {
-			return nil
+		select {
+		case waitErr := <-waitCh:
+			if isDaemonRunning() {
+				return nil
+			}
+			if tail := readDaemonLogTail(logPath); tail != "" {
+				return fmt.Errorf("daemon exited during startup (%v): %s (log: %s)", waitErr, tail, logPath)
+			}
+			return fmt.Errorf("daemon exited during startup (%v) (log: %s)", waitErr, logPath)
+		case <-time.After(100 * time.Millisecond):
+			if isDaemonRunning() {
+				return nil
+			}
 		}
 	}
-	return fmt.Errorf("daemon started (pid: %d) but health check timed out", cmd.Process.Pid)
+	if tail := readDaemonLogTail(logPath); tail != "" {
+		return fmt.Errorf("daemon started (pid: %d) but health check timed out: %s (log: %s)", cmd.Process.Pid, tail, logPath)
+	}
+	return fmt.Errorf("daemon started (pid: %d) but health check timed out (log: %s)", cmd.Process.Pid, logPath)
 }
 
 func execCommand(cmd protocol.Command) (*protocol.Response, error) {
