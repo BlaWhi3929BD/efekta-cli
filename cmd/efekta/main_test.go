@@ -73,3 +73,45 @@ func TestParseTurboBatchCommands(t *testing.T) {
 		t.Errorf("unexpected next cmd: %+v", cmds[8])
 	}
 }
+
+func TestJoinCLIArgs(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "single quoted arg from cmd.exe",
+			args: []string{"'pick", "opt-1;", "next'"},
+			want: "pick opt-1; next",
+		},
+		{
+			name: "double quoted single token",
+			args: []string{"pick opt-1; next"},
+			want: "pick opt-1; next",
+		},
+		{
+			name: "unquoted multi-arg sequence",
+			args: []string{"sequence", "First", "time.", "Yeah; next"},
+			want: "sequence First time. Yeah; next",
+		},
+		{
+			name: "preserves internal quotes without outer pair",
+			args: []string{`sequence 'hi'; say 'bye'`},
+			want: `sequence 'hi'; say 'bye'`,
+		},
+		{
+			name: "preserves mismatched quote edges",
+			args: []string{`sequence 'hi`},
+			want: `sequence 'hi`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := joinCLIArgs(tc.args); got != tc.want {
+				t.Errorf("joinCLIArgs(%q) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}

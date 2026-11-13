@@ -36,6 +36,19 @@ func isDaemonRunning() bool {
 	return resp.StatusCode == http.StatusOK
 }
 
+// joinCLIArgs joins trailing positional CLI arguments and trims matching outer
+// quotes passed verbatim by shells such as Windows cmd.exe.
+func joinCLIArgs(args []string) string {
+	joined := strings.TrimSpace(strings.Join(args, " "))
+	if len(joined) >= 2 {
+		if (joined[0] == '\'' && joined[len(joined)-1] == '\'') ||
+			(joined[0] == '"' && joined[len(joined)-1] == '"') {
+			return strings.TrimSpace(joined[1 : len(joined)-1])
+		}
+	}
+	return joined
+}
+
 func readDaemonLogTail(logPath string) string {
 	data, err := os.ReadFile(logPath)
 	if err != nil {
@@ -533,7 +546,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta eval \"<css_selector>\"")
 			os.Exit(1)
 		}
-		resp, err := execCommand(protocol.Command{Action: "eval", Target: posArgs[1]})
+		resp, err := execCommand(protocol.Command{Action: "eval", Target: joinCLIArgs(posArgs[1:])})
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "screen", "screenshot":
@@ -583,7 +596,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta batch \"pair slot-1:item-2, slot-2:item-1; next\"")
 			os.Exit(1)
 		}
-		subCmds := ParseBatchString(posArgs[1])
+		subCmds := ParseBatchString(joinCLIArgs(posArgs[1:]))
 		resp, err := execCommand(protocol.Command{Action: "batch", Commands: subCmds})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
