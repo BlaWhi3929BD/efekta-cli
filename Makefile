@@ -12,7 +12,7 @@ build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/efekta
 
 test:
-	node -c extension/*.js
+	@for f in extension/*.js extension/tests/*.js; do node -c "$$f" || exit 1; done
 	node --test extension/tests/extension.test.js
 	go vet ./...
 	go test -race -v ./...

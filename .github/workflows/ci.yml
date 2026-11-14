@@ -27,7 +27,11 @@ jobs:
           node-version: '20'
 
       - name: Check extension JS syntax
-        run: node -c extension/*.js
+        shell: bash
+        run: |
+          for f in extension/*.js extension/tests/*.js; do
+            node -c "$f" || exit 1
+          done
 
       - name: Run extension JS unit tests
         run: node --test extension/tests/extension.test.js
