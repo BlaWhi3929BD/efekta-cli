@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,5 +192,82 @@ func TestCommandTimeoutLongMacros(t *testing.T) {
 	}
 	if got := CommandTimeout(protocol.Command{Action: "status"}); got != 25*time.Second {
 		t.Errorf("status timeout should be 25s, got %v", got)
+	}
+}
+
+func TestIsAllowedHost(t *testing.T) {
+	allowed := []string{
+		"127.0.0.1:8765",
+		"127.0.0.1",
+		"localhost:8765",
+		"LOCALHOST",
+		"[::1]:8765",
+		"::1",
+	}
+	for _, h := range allowed {
+		if !IsAllowedHost(h) {
+			t.Errorf("expected Host %q to be allowed", h)
+		}
+	}
+
+	blocked := []string{
+		"",
+		"evil.com:8765",
+		"127.0.0.1.evil.com:8765",
+		"localhost.evil.com",
+		"192.168.1.10:8765",
+	}
+	for _, h := range blocked {
+		if IsAllowedHost(h) {
+			t.Errorf("expected Host %q to be blocked", h)
+		}
+	}
+}
+
+func TestIsAllowedEfektaTabURL(t *testing.T) {
+	if !isAllowedEfektaTabURL("https://learn.better.efekta.com/gap/ui/self-study") {
+		t.Error("expected learn.better.efekta.com HTTPS URL to be allowed")
+	}
+	for _, bad := range []string{
+		"",
+		"http://learn.better.efekta.com/",
+		"https://evil.com/efekta.com",
+		"https://efekta.com.evil.com/login",
+	} {
+		if isAllowedEfektaTabURL(bad) {
+			t.Errorf("expected tab URL %q to be rejected", bad)
+		}
+	}
+}
+
+func TestValidateRemoteAudioURLBlocksSSRF(t *testing.T) {
+	blockedURLs := []string{
+		"http://cdn.efekta.com/audio.mp3",
+		"file:///etc/passwd",
+		"https://127.0.0.1/secret.mp3",
+		"https://169.254.169.254/latest/meta-data/",
+		"https://10.0.0.1/internal.mp3",
+		"https://172.16.0.5/internal.mp3",
+		"https://192.168.1.1/router.mp3",
+		"https://100.64.0.1/cgnat.mp3",
+		"https://0.0.0.0/zero.mp3",
+		"https://[::1]/loopback.mp3",
+		"https://[::ffff:127.0.0.1]/mapped.mp3",
+		"https://[fe80::1]/linklocal.mp3",
+		"https://localhost:8765/api/health",
+		"https://internal.service.local/audio.mp3",
+		"https://user:pass@8.8.8.8/audio.mp3",
+	}
+	for _, u := range blockedURLs {
+		if _, err := validateRemoteAudioURL(context.Background(), u); err == nil {
+			t.Errorf("expected SSRF URL %q to be blocked", u)
+		}
+	}
+
+	if !isPublicIP(net.ParseIP("8.8.8.8")) {
+		t.Error("expected public IP 8.8.8.8 to pass isPublicIP")
+	}
+	if _, err := validateRemoteAudioURL(context.Background(), "https://8.8.8.8/audio.mp3"); err != nil {
+		t.Errorf("expected public HTTPS IP URL to pass validation, got: %v", err)
 	}
 }

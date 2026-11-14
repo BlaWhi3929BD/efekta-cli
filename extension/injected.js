@@ -782,15 +782,58 @@
         }
         return { ok: true, wasArmed: was };
       }
-      case "eval": {
-        try {
-          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-          const fn = new AsyncFunction("document", "window", msg.code);
-          const res = await fn(document, window);
-          return { ok: true, result: res };
-        } catch (e) {
-          return { ok: false, error: e.message };
+      case "cdkSort": {
+        const srcId = String(msg.srcId || "");
+        const dstId = String(msg.dstId || "");
+        const items = Array.from(document.querySelectorAll("ef-sequencing-sort-column-item"));
+        const s = (srcId && items.find((el) => el.getAttribute("data-efekta-id") === srcId)) || items[0];
+        const d = (dstId && items.find((el) => el.getAttribute("data-efekta-id") === dstId)) || items[1];
+        if (!s || !d) return { ok: true, result: false };
+        const sIdx = items.indexOf(s);
+        const dIdx = items.indexOf(d);
+        if (sIdx === -1 || dIdx === -1 || sIdx === dIdx) return { ok: true, result: false };
+        s.focus();
+        const dispatchKey = (k, c, code) => {
+          const active = document.activeElement;
+          if (!active) return;
+          active.dispatchEvent(new KeyboardEvent("keydown", { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
+          active.dispatchEvent(new KeyboardEvent("keyup", { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
+        };
+        dispatchKey(" ", "Space", 32);
+        const diff = sIdx - dIdx;
+        if (diff > 0) {
+          for (let k = 0; k < diff; k++) dispatchKey("ArrowUp", "ArrowUp", 38);
+        } else {
+          for (let k = 0; k < Math.abs(diff); k++) dispatchKey("ArrowDown", "ArrowDown", 40);
         }
+        dispatchKey(" ", "Space", 32);
+        return { ok: true, result: true };
+      }
+      case "triggerZoneInput": {
+        const efId = String(msg.efId || "");
+        let targetEl = null;
+        if (efId) {
+          const all = document.querySelectorAll("textarea, input");
+          for (const el of all) {
+            if (el.getAttribute && el.getAttribute("data-efekta-id") === efId) {
+              targetEl = el;
+              break;
+            }
+          }
+        }
+        if (!targetEl) {
+          targetEl = document.querySelector("textarea") || document.querySelector("input");
+        }
+        if (targetEl && targetEl.closest) {
+          const wci = targetEl.closest("ef-writing-challenge-input");
+          if (wci && wci.__zone_symbol__onInputChangedfalse) {
+            const z = wci.__zone_symbol__onInputChangedfalse;
+            if (z && z[0] && typeof z[0].callback === "function") {
+              z[0].callback(targetEl.value);
+            }
+          }
+        }
+        return { ok: true, result: !!targetEl };
       }
       default:
         return { ok: false, error: "Unknown voice bridge message: " + msg.type };

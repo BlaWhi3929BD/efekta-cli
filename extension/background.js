@@ -601,6 +601,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg && msg.type === "NAVIGATE_TAB" && msg.url && sender && sender.tab) {
+    try {
+      const parsed = new URL(msg.url);
+      if (parsed.protocol !== "https:" || parsed.hostname !== "learn.better.efekta.com") {
+        sendResponse({ ok: false, error: "Blocked unsafe navigation target" });
+        return false;
+      }
+    } catch (_) {
+      sendResponse({ ok: false, error: "Invalid navigation URL" });
+      return false;
+    }
     chrome.tabs.update(sender.tab.id, { url: msg.url }, (tab) => {
       sendResponse({ ok: true, tabId: tab ? tab.id : null });
     });
@@ -609,6 +619,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Fetch cross-origin reference audio bytes for Voice Engine
   if (msg && msg.type === "FETCH_AUDIO_B64" && msg.url) {
+    let validHttps = false;
+    try {
+      validHttps = new URL(msg.url).protocol === "https:";
+    } catch (_) {}
+    if (!validHttps) {
+      sendResponse({ ok: false, error: "Blocked non-HTTPS audio URL" });
+      return false;
+    }
     (async () => {
       try {
         const resp = await fetch(msg.url);

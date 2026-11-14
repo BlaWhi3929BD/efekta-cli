@@ -3,8 +3,11 @@ package daemon
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,6 +25,29 @@ const (
 	ClientHeader = "X-Efekta-Client"
 	ClientValue  = "efekta-cli"
 )
+
+// IsAllowedHost protects against DNS rebinding attacks by allowing only loopback Host headers.
+func IsAllowedHost(host string) bool {
+	h := strings.TrimSpace(strings.ToLower(host))
+	if h == "" {
+		return false
+	}
+	if stripped, _, err := net.SplitHostPort(h); err == nil {
+		h = stripped
+	}
+	h = strings.Trim(h, "[]")
+	return h == "127.0.0.1" || h == "localhost" || h == "::1"
+}
+
+// isAllowedEfektaTabURL validates that reported tab URLs from browser sessions point to Efekta HTTPS origins.
+func isAllowedEfektaTabURL(rawURL string) bool {
+	parsed, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || parsed.Scheme != "https" {
+		return false
+	}
+	h := strings.ToLower(parsed.Hostname())
+	return h == "efekta.com" || strings.HasSuffix(h, ".efekta.com")
+}
 
 // IsAllowedWSOrigin prevents malicious web pages (http:// / https://) from hijacking the local WebSocket.
 // Only browser extensions (chrome-extension://, moz-extension://, safari-web-extension://) or local tools with no Origin are allowed.
@@ -48,7 +74,7 @@ func IsAllowedAPIRequest(r *http.Request) bool {
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
-		return IsAllowedWSOrigin(r.Header.Get("Origin"))
+		return IsAllowedHost(r.Host) && IsAllowedWSOrigin(r.Header.Get("Origin"))
 	},
 }
 
@@ -116,11 +142,16 @@ func (s *Server) selectActiveClient() *ClientSession {
 
 // Handle WebSocket connection from browser extension(s)
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	if !IsAllowedHost(r.Host) {
+		http.Error(w, "Forbidden host", http.StatusForbidden)
+		return
+	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("[daemon] WS Upgrade rejected/failed: %v", err)
 		return
 	}
+	conn.SetReadLimit(16 << 20)
 
 	session := &ClientSession{
 		conn:     conn,
@@ -156,8 +187,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		session.lastSeen = time.Now()
 		if resp.Type == "hello" || resp.Type == "ping" || resp.Type == "pong" {
-			session.hasEfektaTab = resp.HasEfektaTab
-			session.tabURL = resp.TabURL
+			validTab := resp.HasEfektaTab && isAllowedEfektaTabURL(resp.TabURL)
+			session.hasEfektaTab = validTab
+			if validTab {
+				session.tabURL = resp.TabURL
+			} else {
+				session.tabURL = ""
+			}
 			if resp.UserAgent != "" {
 				session.userAgent = resp.UserAgent
 			}
@@ -218,6 +254,10 @@ func (s *Server) SendCommand(cmd protocol.Command, timeout time.Duration) (*prot
 
 // Handle HTTP API calls from CLI
 func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
+	if !IsAllowedHost(r.Host) {
+		http.Error(w, "Forbidden host", http.StatusForbidden)
+		return
+	}
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -229,7 +269,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var cmd protocol.Command
-	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&cmd); err != nil {
 		http.Error(w, fmt.Sprintf("Bad JSON: %v", err), http.StatusBadRequest)
 		return
 	}
@@ -251,6 +291,10 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 // Health check endpoint
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if !IsAllowedHost(r.Host) {
+		http.Error(w, "Forbidden host", http.StatusForbidden)
+		return
+	}
 	s.mu.Lock()
 	clientCount := len(s.clients)
 	hasEfektaTab := false

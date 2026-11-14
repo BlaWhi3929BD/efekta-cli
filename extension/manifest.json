@@ -12,9 +12,10 @@
     "webNavigation"
   ],
   "host_permissions": [
-    "<all_urls>",
     "*://*.efekta.com/*",
     "*://*.better.efekta.com/*",
+    "*://*.ef.com/*",
+    "*://*.efcdn.com/*",
     "http://127.0.0.1/*",
     "http://localhost/*"
   ],

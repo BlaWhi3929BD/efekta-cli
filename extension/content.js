@@ -317,30 +317,9 @@
         const srcId = sourceEl.getAttribute("data-efekta-id") || "";
         const dstId = targetEl.getAttribute("data-efekta-id") || "";
         const r = await callVoiceBridge({
-          type: "eval",
-          code: `
-            const items = Array.from(document.querySelectorAll('ef-sequencing-sort-column-item'));
-            const s = document.querySelector('[data-efekta-id="${srcId}"]') || items[0];
-            const d = document.querySelector('[data-efekta-id="${dstId}"]') || items[1];
-            if (!s || !d) return false;
-            const sIdx = items.indexOf(s);
-            const dIdx = items.indexOf(d);
-            if (sIdx === -1 || dIdx === -1 || sIdx === dIdx) return false;
-            s.focus();
-            const p = (k, c, code) => {
-              document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
-              document.activeElement.dispatchEvent(new KeyboardEvent('keyup', { key: k, code: c, keyCode: code, which: code, bubbles: true, cancelable: true }));
-            };
-            p(' ', 'Space', 32);
-            const diff = sIdx - dIdx;
-            if (diff > 0) {
-              for (let k = 0; k < diff; k++) p('ArrowUp', 'ArrowUp', 38);
-            } else {
-              for (let k = 0; k < Math.abs(diff); k++) p('ArrowDown', 'ArrowDown', 40);
-            }
-            p(' ', 'Space', 32);
-            return true;
-          `
+          type: "cdkSort",
+          srcId,
+          dstId
         });
         if (r && r.ok && r.result) {
           await sleep(60);
@@ -612,19 +591,8 @@
       try {
         const efId = el.getAttribute("data-efekta-id") || "";
         await callVoiceBridge({
-          type: "eval",
-          code: `
-            const targetEl = (document.querySelector('[data-efekta-id="${efId}"]')) || document.querySelector('textarea') || document.querySelector('input');
-            if (targetEl) {
-              const wci = targetEl.closest ? targetEl.closest('ef-writing-challenge-input') : null;
-              if (wci && wci.__zone_symbol__onInputChangedfalse) {
-                const z = wci.__zone_symbol__onInputChangedfalse;
-                if (z && z[0] && typeof z[0].callback === 'function') {
-                  z[0].callback(targetEl.value);
-                }
-              }
-            }
-          `
+          type: "triggerZoneInput",
+          efId
         });
       } catch (_) {}
       await sleep(60);
@@ -4626,12 +4594,9 @@
         const docs = getAllDocs();
 
         if (rawTarget.startsWith("page:") || rawTarget.startsWith("js:")) {
-          const code = rawTarget.slice(rawTarget.indexOf(":") + 1).trim();
-          const r = await callVoiceBridge({ type: "eval", code });
           return {
-            success: r && r.ok,
-            data: r ? r.result : null,
-            error: r ? r.error : "No bridge response"
+            success: false,
+            error: "Arbitrary JavaScript eval is disabled; pass a CSS selector, 'info:<sel>', 'click:<sel>', or 'all:<sel>'"
           };
         }
 
