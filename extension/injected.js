@@ -485,7 +485,7 @@
       rate: out.ctx.sampleRate
     });
     ensureRunning(s).then(() => startPlayback(s, "auto"));
-    setTimeout(() => cleanupSession(s), durMs + leadMs + 20000);
+    s.cleanupTimer = setTimeout(() => cleanupSession(s), durMs + leadMs + 20000);
     return s;
   }
 
@@ -544,11 +544,15 @@
 
   function cleanupSession(s, force = false) {
     if (!s || s.closed) return;
+    if (s.cleanupTimer) {
+      clearTimeout(s.cleanupTimer);
+      s.cleanupTimer = null;
+    }
     if (!force) {
       const clipDur = s.buffer ? Math.round(s.buffer.duration * 1000) : 2500;
       const minEnd = (s.playEndsAt || (s.createdAt + (s.leadMs || 200) + clipDur)) + (s.tailMs || 1000);
       if (Date.now() < minEnd) {
-        setTimeout(() => cleanupSession(s), Math.max(50, minEnd - Date.now()));
+        s.cleanupTimer = setTimeout(() => cleanupSession(s), Math.max(50, minEnd - Date.now()));
         return;
       }
     }
