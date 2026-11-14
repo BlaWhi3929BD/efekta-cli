@@ -207,6 +207,59 @@ async function getCandidateFrames(tabId) {
   return candidates;
 }
 
+const SELF_STUDY_URL = "https://learn.better.efekta.com/gap/ui/self-study";
+
+async function waitForTabExitLessonView(tabId, timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const t = await chrome.tabs.get(tabId);
+      if (t && t.url && !t.url.includes("/lesson-view") && t.status === "complete") {
+        return true;
+      }
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  return false;
+}
+
+async function ensureSelfStudyFromLessonView(tab) {
+  const activeFrame = tabActiveFrames.get(tab.id);
+  const inLesson = (tab.url && tab.url.includes("/lesson-view")) || (activeFrame && activeFrame !== 0);
+  if (!inLesson) return tab;
+
+  try {
+    await sendMessageToTabWithRetry(tab.id, { action: "_click_close_lesson" });
+  } catch (_) {}
+
+  const exitedViaBtn = await waitForTabExitLessonView(tab.id, 2500);
+  if (!exitedViaBtn) {
+    await chrome.tabs.update(tab.id, { url: SELF_STUDY_URL });
+    await waitForTabExitLessonView(tab.id, 8000);
+  }
+  tabActiveFrames.delete(tab.id);
+  await ensureContentScriptInjected(tab.id);
+  await new Promise((r) => setTimeout(r, 350));
+  return await chrome.tabs.get(tab.id);
+}
+
+async function sendMessageToTopFrame(tabId, req) {
+  for (let pass = 0; pass < 2; pass++) {
+    const res = await sendMsg(tabId, req, { frameId: 0 });
+    if (res && !res.transportError && !isTransportError(res.error)) {
+      tabActiveFrames.delete(tabId);
+      return res;
+    }
+    if (pass === 0) {
+      await ensureContentScriptInjected(tabId);
+      await new Promise((r) => setTimeout(r, 250));
+    } else {
+      return res;
+    }
+  }
+  return { success: false, error: "Failed to communicate with Efekta top frame" };
+}
+
 // Send command to content script with automatic iframe discovery, active-frame routing, and auto-reinject
 async function sendMessageToTabWithRetry(tabId, req) {
   for (let pass = 0; pass < 2; pass++) {
@@ -435,7 +488,33 @@ function connectDaemon() {
           return;
         }
 
-        const response = await sendMessageToTabWithRetry(tab.id, req);
+        let response;
+        if (action === "lesson") {
+          const lessonQuery = String(req.target || req.text || "next").trim().toLowerCase();
+          if (lessonQuery === "close" || lessonQuery === "exit") {
+            await ensureSelfStudyFromLessonView(tab);
+            response = {
+              success: true,
+              message: "Closed lesson, returned to course overview"
+            };
+          } else if (lessonQuery === "resume") {
+            response = await sendMessageToTabWithRetry(tab.id, req);
+          } else {
+            await ensureSelfStudyFromLessonView(tab);
+            response = await sendMessageToTopFrame(tab.id, req);
+          }
+        } else if (
+          action === "batch" &&
+          Array.isArray(req.commands) &&
+          req.commands.length > 0 &&
+          String(req.commands[0].action || "").toLowerCase() === "lesson" &&
+          String(req.commands[0].target || "").trim().toLowerCase() !== "resume"
+        ) {
+          await ensureSelfStudyFromLessonView(tab);
+          response = await sendMessageToTopFrame(tab.id, req);
+        } else {
+          response = await sendMessageToTabWithRetry(tab.id, req);
+        }
         ws.send(
           JSON.stringify({
             id: reqId,

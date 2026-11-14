@@ -1498,7 +1498,7 @@
                 return NodeFilter.FILTER_REJECT;
               }
               try {
-                const w = (doc.defaultView) || window;
+                const w = (pe.ownerDocument && pe.ownerDocument.defaultView) || window;
                 const st = w.getComputedStyle(pe);
                 if (
                   st.display === "none" ||
@@ -2322,6 +2322,7 @@
       t === "fill_in_the_blanks" ||
       t === "writing_essay" ||
       t === "order_sentence" ||
+      t === "order_dialogue" ||
       t === "multiple_choice" ||
       t === "progress_test_choice" ||
       t === "speaking_practice" ||
@@ -3060,12 +3061,12 @@
         break;
       }
 
-      // Check if we are on the final item or passed required (e.g. "4 / 5" or "5 / 5") -> leave Next ready for '; next'
+      // Check if we are on the final item (e.g. "5 / 5" or "6 / 6") -> leave Next ready for '; next'
       const optList = (postSt.agentHint && postSt.agentHint.options) || [];
       const ctxList = postSt.contextText || [];
       const allText = optList.concat(ctxList).join(" ") + " " + (curInfo.progressText || "");
       const m = allText.match(/(\d+)\s*\/\s*(\d+)/);
-      if (m && (m[1] === m[2] || Number(m[1]) >= 4)) {
+      if (m && Number(m[2]) > 0 && Number(m[1]) >= Number(m[2])) {
         break;
       }
 
@@ -4028,8 +4029,8 @@
       }
 
       if (t === "matching_pairs") {
-        const dragEls = (st.elements || []).filter((e) => e.type === "item");
-        const slotEls = (st.elements || []).filter((e) => e.type === "slot");
+        const dragEls = (st.elements || []).filter((e) => e.type === "draggable" && !e.disabled);
+        const slotEls = (st.elements || []).filter((e) => e.type === "drop_target");
         if (slotEls.length === 0 && dragEls.length >= 4) {
           const sug = suggestImageWordPairs(dragEls);
           if (sug && sug.confident) {
@@ -4098,30 +4099,33 @@
   // - "resume": Continue currently active/in-progress lesson
   // - "close" / "exit": Close active lesson and return to self-study overview
   // - Spec: "U1L2", "1.2", "L2", "2", "final test", or search keyword ("Ordering a meal", "reservation")
+  async function tryClickCloseLessonBtn() {
+    const docs = getAllDocs();
+    for (const d of docs) {
+      const closeBtn = d.querySelector(
+        "button.close-button, button[aria-label*='Close lesson'], [data-id*='close-lesson']"
+      );
+      if (closeBtn && isVisible(closeBtn)) {
+        await simulateClick(closeBtn);
+        return true;
+      }
+    }
+    return false;
+  }
+
   async function executeLesson(spec = "next") {
     const raw = (spec || "").trim();
     const query = raw.toLowerCase();
 
-    // 0. Handle close / exit
+    // 0. Handle close / exit via SPA button (tab-level fallback handled by background.js)
     if (query === "close" || query === "exit") {
-      const docs = getAllDocs();
-      for (const doc of docs) {
-        const closeBtn = doc.querySelector(
-          "button.close-button, button[aria-label*='Close lesson'], [data-id*='close-lesson']"
-        );
-        if (closeBtn && isVisible(closeBtn)) {
-          await simulateClick(closeBtn);
-          break;
-        }
-      }
-      try {
-        chrome.runtime.sendMessage({
-          type: "NAVIGATE_TAB",
-          url: "https://learn.better.efekta.com/gap/ui/self-study"
-        });
-      } catch (_) {}
-      await sleep(600);
-      return { success: true, message: "Closed lesson, returned to course overview" };
+      const clicked = await tryClickCloseLessonBtn();
+      await sleep(500);
+      return {
+        success: clicked || window.location.pathname.includes("/self-study"),
+        closedByButton: clicked,
+        message: "Closed lesson, returned to course overview"
+      };
     }
 
     // 1. If currently inside a lesson player and user requested something other than "resume":
@@ -4135,25 +4139,10 @@
       if (query === "resume") {
         return await executeAutoNext(4);
       }
-      // Need to exit first to access unit list
-      const docs = getAllDocs();
-      for (const doc of docs) {
-        const closeBtn = doc.querySelector(
-          "button.close-button, button[aria-label*='Close lesson'], [data-id*='close-lesson']"
-        );
-        if (closeBtn && isVisible(closeBtn)) {
-          await simulateClick(closeBtn);
-          break;
-        }
-      }
-      try {
-        chrome.runtime.sendMessage({
-          type: "NAVIGATE_TAB",
-          url: "https://learn.better.efekta.com/gap/ui/self-study"
-        });
-      } catch (_) {}
+      // Try SPA exit without tearing down the executing frame via NAVIGATE_TAB
+      await tryClickCloseLessonBtn();
 
-      // Wait for navigation back to /gap/ui/self-study
+      // Wait for SPA navigation back to /gap/ui/self-study
       const waitStart = Date.now();
       while (Date.now() - waitStart < 5000) {
         await sleep(250);
@@ -4164,7 +4153,7 @@
           break;
         }
       }
-      await sleep(500);
+      await sleep(400);
     }
 
     // 2. If on /gap/ui/home, navigate to /gap/ui/self-study
@@ -4570,8 +4559,14 @@
         await simulateKeyPress(target, key);
         return { success: true, message: `Pressed key ${key}` };
       }
+      case "_click_close_lesson": {
+        const clicked = await tryClickCloseLessonBtn();
+        return { success: clicked, message: clicked ? "Clicked close lesson button" : "Close button not found" };
+      }
       case "scroll": {
-        const dy = cmd.amount || (cmd.direction === "up" ? -400 : 400);
+        const rawAmt = Number(cmd.amount);
+        const mag = Number.isFinite(rawAmt) && rawAmt !== 0 ? Math.abs(rawAmt) : 400;
+        const dy = cmd.direction === "up" ? -mag : rawAmt < 0 ? rawAmt : mag;
         const docs = getAllDocs();
         for (const doc of docs) {
           const scrollables = doc.querySelectorAll(
@@ -4614,6 +4609,11 @@
         return await executeSequence(cmd.target || cmd.text || "");
       }
       case "skip_speaking": {
+        const st = inspectState();
+        const hasSkipBtn = st.elements.some((e) => e.type === "skip_btn" && !e.disabled);
+        if (st.exerciseType === "speaking_practice" || hasSkipBtn) {
+          return await executeSkipDrill();
+        }
         const res = await solveSpeakingTask();
         return {
           success: res.success,
