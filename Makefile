@@ -13,6 +13,8 @@ build:
 
 test:
 	node -c extension/*.js
+	node --test extension/tests/extension.test.js
+	go vet ./...
 	go test -race -v ./...
 
 install: build
