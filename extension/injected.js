@@ -435,7 +435,11 @@
   function resumeAllContexts() {
     for (const ctx of allCreatedCtxs) {
       try {
-        if (ctx.state === "suspended") ctx.resume().catch(() => {});
+        if (ctx.state === "closed") {
+          allCreatedCtxs.delete(ctx);
+        } else if (ctx.state === "suspended") {
+          ctx.resume().catch(() => {});
+        }
       } catch (_) {}
     }
   }
@@ -538,13 +542,15 @@
     note("inj-play-start", { id: s.id, trigger, durMs });
   }
 
-  function cleanupSession(s) {
+  function cleanupSession(s, force = false) {
     if (!s || s.closed) return;
-    const clipDur = s.buffer ? Math.round(s.buffer.duration * 1000) : 2500;
-    const minEnd = (s.playEndsAt || (s.createdAt + (s.leadMs || 200) + clipDur)) + (s.tailMs || 1000);
-    if (Date.now() < minEnd) {
-      setTimeout(() => cleanupSession(s), Math.max(50, minEnd - Date.now()));
-      return;
+    if (!force) {
+      const clipDur = s.buffer ? Math.round(s.buffer.duration * 1000) : 2500;
+      const minEnd = (s.playEndsAt || (s.createdAt + (s.leadMs || 200) + clipDur)) + (s.tailMs || 1000);
+      if (Date.now() < minEnd) {
+        setTimeout(() => cleanupSession(s), Math.max(50, minEnd - Date.now()));
+        return;
+      }
     }
     s.closed = true;
     if (s.audioEl) {
@@ -557,6 +563,7 @@
       try { URL.revokeObjectURL(s.blobUrl); } catch (_) {}
     }
     for (const o of s.outputs) {
+      allCreatedCtxs.delete(o.ctx);
       try {
         if (o.ctx.state !== "closed") o.ctx.close();
       } catch (_) {}
@@ -770,8 +777,7 @@
         const was = !!armed;
         armed = null;
         if (session) {
-          session.closed = true;
-          cleanupSession(session);
+          cleanupSession(session, true);
           session = null;
         }
         return { ok: true, wasArmed: was };
