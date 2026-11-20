@@ -252,8 +252,8 @@ USAGE:
   efekta <command> [arguments] [flags]
 
 TURBO MACRO COMMANDS (1-Command-Per-Screen):
-  next / ff                    Auto-advance & fast-forward through all passive/reading/summary/eval screens
-  auto / autopilot             Autonomous progression (auto-solves multiple choice, skips drills, navigates passive screens)
+  next / ff                    Auto-advance & fast-forward through passive/reading/video/summary/eval screens
+  auto / autopilot [N] [speak] Autonomous progression (solves all regular exercises, >50% step skip, dialogues, essays)
   skip                         Skip all remaining phrases in a pronunciation drill in 1 shot & advance
   pick <id1,id2,...>           Click 1 or more options/tokens with auto-unlock wait (e.g. pick opt-1,opt-3)
   pair "<slot:item, ...>"      Match all left:right pairs in 1 roundtrip (e.g. pair "slot-1:item-3, slot-2:item-1")
@@ -261,10 +261,10 @@ TURBO MACRO COMMANDS (1-Command-Per-Screen):
   gaps "<word1, word2, ...>"   Fill selection-gap drawers or text blanks in order (auto-opens drawers)
   speak [all|"<phrase>"]       Speak target English phrase(s) via native reference audio loopback or TTS!
   dialogue [picks]             Conduct multi-turn AI avatar dialogues (handles speech & tap turns)
-  essay ["<text>"]             Auto-write or type 80+ word formal essay/email, submit & pass evaluation
-  sequence ["<words>"]         Auto-order tokens in tap-sequencing task, reset if needed & advance
-  lesson [next|list|<id>]      Select and start lesson autonomously (e.g. lesson next, lesson list, lesson U1L2)
-  batch "<cmd1>; <cmd2>; next" Execute full exercise + auto-advance in a single roundtrip!
+  essay ["<text>"]             Auto-write or type 80-120+ word formal essay/email, submit & pass evaluation
+  sequence ["<words>"]         Auto-order tokens in tap-sequencing task, wait for pop-back & advance
+  lesson [next|list|<id>]      Select and start lesson autonomously (e.g. lesson next, lesson list, lesson U1L2, TEST)
+  batch "<cmd1>; <cmd2>; next" Execute chains in 1 roundtrip (supports cross-frame "lesson U2L1; auto", eval, wait 2s)
 
 CORE COMMANDS:
   state / status               Inspect page: exerciseType, agentHint, prompt, contextText & element IDs
@@ -272,11 +272,11 @@ CORE COMMANDS:
   drag <source> <target>       Drag element (item-1) to target slot/column (slot-1)
   type <target> "<text>"       Type text into input/blank (instant bulk-fill for long essays)
   press <key>                  Press keyboard key (Enter, Backspace, Escape, Tab, Space)
-  scroll <up|down|pixels>      Scroll page smoothly
-  wait <ms|video-end|next>     Wait for milliseconds, avatar video end, or Next button unlock
+  scroll <up|down|pixels>      Scroll page and inner lesson containers smoothly
+  wait <ms|Ns|Nms|cond>        Wait for duration (e.g. 400, 2s, 1500ms) or condition (video-end | next | unlocked)
   eval "<css_selector>"        Inspect matching DOM elements by CSS selector
   screen [-o file.png]         Capture lossless PNG screenshot of the Efekta tab
-  solve <strategy>             Run smart solver: choice | sentence | speak
+  solve <strategy>             Smart solver (regular lessons): auto | choice | gaps | sort | pair | order | sentence | speak
   voice [status|disarm|events] Inspect Voice Engine v3 status or disarm microphone override
   reload [all|ext|tab]         Reload browser extension and/or Efekta tab
 
@@ -304,17 +304,19 @@ func printAgentGuide() {
 
 ## 0. THE 5 GOLDEN RULES (MEMORIZE THESE!)
 1. **LET THE PROGRAM DO THE WORK FIRST ('efekta auto'):**
-   'efekta auto --json -c' autonomously navigates passive reading cards, auto-skips pronunciation drills, auto-solves multiple choice, conducts avatar dialogues, and submits essays. It only stops when human knowledge exercises ('gaps', 'sort', 'pair') need an answer!
-2. **ALWAYS end every exercise batch with '; next' (or '; auto'):**
-   Appending '; next' clicks Next AND automatically fast-forwards through all consecutive reading cards, "Correct answers" reviews, self-evaluations, "Step passed!" summaries, and Lesson Overviews until the next interactive exercise!
+   'efekta auto --json -c' autonomously unlocks video/reading cards, runs the >50% Step Activity Planner (skipping straight to Step summary once >50% pass, or speaking drills when needed), solves all regular-lesson exercises (multiple_choice, selection_gaps, categorize_columns incl. distractors, matching_pairs, order_dialogue, order_sentence, word-family tables), conducts avatar dialogues, and submits essays.
+   It stops only on Progress Tests ('progress_test_choice'), CAPTCHA ('human_verification_required'), or free-text edge cases.
+2. **ALWAYS end every manual exercise batch with '; next' (or '; auto'):**
+   Appending '; next' clicks Next AND fast-forwards through reading cards, "Correct answers" reviews, self-evaluations, "Step passed!" summaries, and Lesson Overviews.
 3. **ALWAYS read 'agentHint' first (use '--json -c' for 80% smaller output):**
-   'agentHint' gives you 'exerciseType', 'slots', 'items', 'options' (pre-populated even on selection_gaps!), and a ready-to-fill 'actionTemplate'.
+   'agentHint' gives you 'exerciseType', 'slots', 'items', 'options' (pre-populated even on selection_gaps!), 'activities', and a ready-to-fill 'actionTemplate'.
 4. **SKIP MULTI-PHRASE PRONUNCIATION DRILLS IN 1 COMMAND ('efekta skip'):**
-   Whenever a pronunciation drill appears in Stages 1–5, run 'efekta skip --json -c' to skip all phrases in 1 shot and advance.
-5. **PROGRESS TEST MANDATE ("Take the final test") — ZERO TRIAL-AND-ERROR:**
-   - TRIAL-AND-ERROR / BRUTE-FORCE ('solve choice') IS STRICTLY FORBIDDEN ON FORMAL TESTS!
+   Whenever an optional pronunciation drill appears in Stages 1–5, run 'efekta skip --json -c' to skip all phrases in 1 shot and advance.
+5. **PROGRESS TEST MANDATE ("Take the final test") & ANTI-BOT GUARD:**
+   - TRIAL-AND-ERROR / BRUTE-FORCE ('solve *' and 'auto') ARE STRICTLY FORBIDDEN ON FORMAL TESTS!
    - On the Progress Test, every question is an unrepeatable formal assessment; incorrect choices directly degrade the certificate score below the mandatory 70% threshold.
-   - The engine automatically detects Progress Tests and safely blocks brute-force solvers. Always analyze questions grammatically and submit with 'efekta batch "pick opt-X; next" --json -c'.
+   - The engine automatically detects Progress Tests and safely blocks all trial-and-error solvers. Always analyze questions grammatically and submit with 'efekta batch "pick opt-X; next" --json -c'.
+   - Never bypass 'human_verification_required' (Cloudflare Turnstile / reCAPTCHA): report to the user and pause.
 
 ---
 
@@ -322,19 +324,19 @@ func printAgentGuide() {
 
 | 'exerciseType' in State | Instant 1-Roundtrip Command | MCP Tool Equivalent |
 | :--- | :--- | :--- |
-| 'course_overview' / dashboard | 'efekta lesson next --json -c' | efekta_lesson(target="next") |
-| 'passive_screen' / 'lesson_overview' | 'efekta next --json -c' (or 'efekta auto --json -c') | efekta_next() / efekta_autopilot() |
+| 'course_overview' / dashboard | 'efekta batch "lesson next; auto" --json -c' | efekta_lesson(target="next") |
+| 'passive_screen' / 'video_stage' / 'lesson_overview' | 'efekta auto --json -c' (or 'efekta next --json -c') | efekta_autopilot() |
 | 'multiple_choice' (regular lesson) | 'efekta batch "solve choice; next" --json -c' | efekta_solve(strategy="choice") |
 | 'progress_test_choice' (Final Test) | 'efekta batch "pick opt-X; next" --json -c' (Analyze first!) | efekta_batch(commands="pick opt-X; next") |
-| 'speaking_practice' (Stages 1–5 drill) | 'efekta skip --json -c' | efekta_solve(strategy="speak") |
+| 'speaking_practice' (Stages 1–5 drill) | 'efekta skip --json -c' (or 'efekta batch "speak all; next" --json -c') | efekta_solve(strategy="speak") |
 | 'speaking_avatar' (AI video roleplay) | 'efekta batch "dialogue; next" --json -c' | efekta_dialogue() |
-| 'selection_gaps' / 'fill_in_the_blanks' | 'efekta batch "gaps word1, word2, word3; next" --json -c' | efekta_batch(commands="gaps ...; next") |
+| 'selection_gaps' / 'fill_in_the_blanks' (table) | 'efekta batch "solve gaps; next" --json -c' (or 'gaps w1, w2; next') | efekta_solve(strategy="gaps") |
 | 'writing_essay' (80–120+ words) | 'efekta batch "essay; next" --json -c' | efekta_essay(text="auto") |
-| 'matching_pairs' | 'efekta batch "pair slot-1:item-3, slot-2:item-1; next" --json -c' | efekta_batch(commands="pair ...; next") |
-| 'categorize_columns' (sorting) | 'efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2; next" --json -c' | efekta_batch(commands="sort ...; next") |
-| 'order_sentence' (tap sequence) | 'efekta batch "sequence auto; next" --json -c' | efekta_sequence(tokens="auto") |
+| 'matching_pairs' | 'efekta batch "solve pair; next" --json -c' (or 'pair slot-1:item-X; next') | efekta_solve(strategy="pair") |
+| 'categorize_columns' (sorting) | 'efekta batch "solve sort; next" --json -c' (or 'sort slot-1:item-1; next') | efekta_solve(strategy="sort") |
+| 'order_sentence' (tap sequence) | 'efekta batch "solve sentence; next" --json -c' (or 'sequence "<text>"; next') | efekta_solve(strategy="sentence") |
 | 'order_sentence' (token picker) | 'efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c' | efekta_batch(commands="pick ...; next") |
-| 'order_dialogue' (cdk-drag reordering) | 'efekta batch "drag item-2 item-1; next" --json -c' | efekta_batch(commands="drag ...; next") |
+| 'order_dialogue' (cdk-drag reordering) | 'efekta batch "solve order; next" --json -c' (or 'drag item-2 item-1; next') | efekta_solve(strategy="order") |
 
 ---
 

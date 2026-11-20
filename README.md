@@ -88,12 +88,14 @@ efekta lesson next
 
 | What you want to do / Что сделать | Command / Команда |
 | :--- | :--- |
-| **Полный автопилот** (решает тесты, говорит с аватаром, листает теорию) | `efekta auto` |
+| **Полный автопилот** (решает задания обычных уроков, диалоги, эссе, >50% Step Planner) | `efekta auto` |
+| **Запустить конкретный урок и сразу автопилот** | `efekta batch "lesson U2L3; auto"` |
 | **Найти и начать следующий урок** автоматически | `efekta lesson next` |
-| **Показать список всех уроков** и процент прохождения | `efekta lesson list` |
-| **Перейти к конкретному уроку** (например, Unit 2 Lesson 3) | `efekta lesson U2L3` |
-| **Промотать карточки чтения / результаты** к следующему заданию | `efekta next` |
-| **Пропустить тренировку произношения** за 1 секунду | `efekta skip` |
+| **Показать список всех уроков** и статус прохождения | `efekta lesson list` |
+| **Перейти к конкретному уроку** (например, Unit 2 Lesson 3 или Final Test) | `efekta lesson U2L3` / `efekta lesson TEST` |
+| **Промотать карточки чтения / видео / результаты** к следующему заданию | `efekta next` |
+| **Пропустить тренировку произношения** за 1 команду | `efekta skip` |
+| **Авторешатель конкретного типа задания** (`auto\|choice\|gaps\|sort\|pair\|order\|sentence\|speak`) | `efekta solve auto` |
 | **Пройти диалог с видео-аватаром** (ролевая игра) | `efekta dialogue` |
 | **Написать эссе / формальное письмо** (120+ слов B2 уровня) | `efekta essay` |
 | **Проверить статус подключения** к браузеру | `efekta daemon status` |
@@ -101,16 +103,11 @@ efekta lesson next
 
 ---
 
-## 🛡️ Progress Test Safeguard ("Take the final test")
+## 🛡️ Progress Test Safeguard & Step Planner
 
-On regular lessons, trial-and-error (`solve choice`) is allowed. However, on the **Final Progress Test**:
-- **Automatic Test Score Protection:** Every question on the Progress Test is a single-shot formal assessment that directly determines your certificate score (minimum 70% required).
-- The program **automatically detects** when you are on the Progress Test (`exerciseType: "progress_test_choice"`).
-- Dangerous brute-force commands (`solve choice` and `auto`) are **strictly blocked** on tests to protect you from losing points!
-- The CLI prompts you to derive the correct answer grammatically and submit safely with:
-  ```bash
-  efekta batch "pick opt-2; next"
-  ```
+- **Automatic Test Score Protection ("Take the final test"):** Every question on the Progress Test is a single-shot formal assessment (minimum 70% required). The program **automatically detects** the Final Test (`exerciseType: "progress_test_choice"`) and **strictly blocks** `auto` and all trial-and-error `solve *` commands, requiring careful grammatical analysis via `efekta batch "pick opt-2; next"`.
+- **Smart `> 50%` Step Activity Planner (Regular Lessons):** Automatically monitors step progress pills (`act-1..act-N`). Once `> 50%` of activities are `100%`, `auto` skips directly to `Step summary`; if `"Step not passed"` occurs, it jumps back to incomplete activities or speaks pronunciation drills via Voice Engine v3 when needed for the threshold.
+- **Auth & Anti-Bot Isolation:** Cloudflare Turnstile / reCAPTCHA and `catalyst-enter` frames are strictly excluded from script injection and reported cleanly as `human_verification_required`.
 
 ---
 
@@ -179,19 +176,23 @@ If you ever want to check its status: `efekta daemon status`. To stop it: `efekt
 
 | MCP Tool | Description |
 | :--- | :--- |
-| `efekta_autopilot` | Full autonomous progression across passive screens, drills, dialogues, and multiple choice |
-| `efekta_status` | Inspect exercise type, prompt, blanks (`[input-1]`), feedback, video state, and virtual IDs |
-| `efekta_next` | Fast-forward through consecutive passive screens and summaries until interactive exercise |
-| `efekta_batch` | Execute chained commands in a single roundtrip (e.g. `"gaps word1, word2; next"`) |
-| `efekta_lesson` | Select, list, or start lessons and the final progress test (`target: "next" \| "list" \| "U1L1" \| "TEST"`) |
+| `efekta_autopilot` | Full autonomous progression across passive/video/scroll cards, `>50%` Step Planner, drills, dialogues, essays, and regular-lesson solvers |
+| `efekta_status` | Inspect exercise type (`agentHint`, `prompt`, `[input-N]`/`[slot-N]`, `video`, `activities`, `canProceed`) |
+| `efekta_next` | Fast-forward through consecutive passive/video/reading/summary screens until the next interactive exercise |
+| `efekta_batch` | Execute chained commands in a single roundtrip (supports cross-frame `"lesson U2L1; auto"`, `wait 2s`, `eval`, etc.) |
+| `efekta_lesson` | Select, list, or start lessons and the final progress test (`target: "next" \| "list" \| "U1L1" \| "TEST" \| "resume" \| "close"`) |
 | `efekta_dialogue` | Complete multi-turn AI avatar roleplays end to end with speech and tap options |
 | `efekta_essay` | Auto-write and submit 120+ word B2 formal email/essay and pass self-evaluation |
-| `efekta_sequence` | Auto-order tokens in tap-sequencing tasks (`tokens: "auto"` or sentence text) |
-| `efekta_solve` | Smart solvers: `choice` (regular lessons), `sentence` (word ordering), `speak` (skip drills) |
+| `efekta_sequence` | Auto-order tokens in tap-sequencing tasks (`tokens: "auto"` or sentence text) and wait for Check feedback |
+| `efekta_solve` | Smart regular-lesson solvers: `auto`, `choice`, `gaps`, `sort`, `pair`, `order`, `sentence`, `speak` (blocked on Progress Tests) |
 | `efekta_click` | Click element by virtual ID (`opt-1`, `next-1`), selector, text, or coordinates |
 | `efekta_drag` | Drag word/card (`item-N`) to target slot/column (`slot-N`) |
 | `efekta_type` | Type text into a blank input (`input-N`) |
-| `efekta_wait` | Wait for `video-end`, `next`, or milliseconds |
+| `efekta_wait` | Wait for `'video-end'`, `'next'`, `'unlocked'`, or duration (`'350'`, `'1500ms'`, `'2s'`) |
+| `efekta_eval` | Query visible/shadow DOM elements by CSS selector |
+| `efekta_speak` | Speak target phrase(s) via Voice Engine v3 without touching the OS microphone |
+| `efekta_scroll` | Scroll page and inner lesson containers |
+| `efekta_press` | Press special keyboard keys (`Enter`, `Escape`, `Tab`, `Space`, arrows) |
 | `efekta_screenshot` | Capture lossless PNG screenshot of the Efekta tab |
 
 ---
@@ -202,20 +203,21 @@ When interacting with the CLI, always pass `--json -c` for 80% smaller compact o
 
 | `exerciseType` | What You See in `agentHint` | 1-Roundtrip CLI Command | MCP Tool Equivalent |
 | :--- | :--- | :--- | :--- |
-| `course_overview` / dashboard | On `/gap/ui/self-study` | `efekta lesson next --json -c` | `efekta_lesson(target="next")` |
-| `passive_screen` / `lesson_overview` | `canProceed: true` or `stage-N` | `efekta next --json -c` *(or `efekta auto`)* | `efekta_autopilot()` |
+| `course_overview` / dashboard | On `/gap/ui/self-study` | `efekta batch "lesson next; auto" --json -c` | `efekta_lesson(target="next")` |
+| `passive_screen` / `video_stage` / `lesson_overview` | `canProceed: true` or `stage-N` | `efekta auto --json -c` *(or `efekta next`)* | `efekta_autopilot()` |
 | `multiple_choice` (Lesson) | `options: ["opt-1: ...", ...]` | `efekta batch "solve choice; next" --json -c` | `efekta_solve(strategy="choice")` |
 | **`progress_test_choice` (Final Test)** | Graded single-shot exam question | `efekta batch "pick opt-X; next" --json -c` *(Analyze first!)* | `efekta_batch(commands="pick opt-X; next")` |
 | `speaking_practice` | Pronunciation drill (Stages 1–5) | `efekta skip --json -c` | `efekta_solve(strategy="speak")` |
 | `speaking_avatar` | Final avatar dialogue | `efekta batch "dialogue; next" --json -c` | `efekta_dialogue()` |
-| `selection_gaps` | `[slot-N]` + drawer options | `efekta batch "gaps word1, word2; next" --json -c` | `efekta_batch(commands="gaps ...; next")` |
-| `fill_in_the_blanks` | `[input-N]` text blanks | `efekta batch "gaps ans1, ans2; next" --json -c` | `efekta_batch(commands="gaps ...; next")` |
+| `selection_gaps` | `[slot-N]` + drawer options | `efekta batch "solve gaps; next" --json -c` *(or `gaps w1, w2; next`)* | `efekta_solve(strategy="gaps")` |
+| `fill_in_the_blanks` | `[input-N]` text blanks | `efekta batch "solve gaps; next" --json -c` *(or `gaps ans1, ans2; next`)* | `efekta_solve(strategy="gaps")` |
 | `writing_essay` | 80–120+ word textarea | `efekta batch "essay; next" --json -c` | `efekta_essay(text="auto")` |
-| `matching_pairs` | `slots` + `items` | `efekta batch "pair slot-1:item-2; next" --json -c` | `efekta_batch(commands="pair ...; next")` |
-| `categorize_columns` | Category `slots` + `items` | `efekta batch "sort slot-1:item-1; next" --json -c` | `efekta_batch(commands="sort ...; next")` |
-| `order_sentence` (tap sequence) | `ef-sequencing-tap-option-task` | `efekta batch "sequence auto; next" --json -c` | `efekta_sequence(tokens="auto")` |
+| `matching_pairs` | `slots` + `items` | `efekta batch "solve pair; next" --json -c` *(or `pair slot-1:item-2; next`)* | `efekta_solve(strategy="pair")` |
+| `categorize_columns` | Category `slots` + `items` | `efekta batch "solve sort; next" --json -c` *(or `sort slot-1:item-1; next`)* | `efekta_solve(strategy="sort")` |
+| `order_sentence` (tap sequence) | `ef-sequencing-tap-option-task` | `efekta batch "solve sentence; next" --json -c` *(or `sequence "<text>"; next`)* | `efekta_solve(strategy="sentence")` |
 | `order_sentence` (token picker) | Shuffled words in `items` | `efekta batch "pick item-3,item-1; next" --json -c` | `efekta_batch(commands="pick ...; next")` |
-| `order_dialogue` | Dialogue turns (`cdk-drag`) | `efekta batch "drag item-2 item-1; next" --json -c` | `efekta_batch(commands="drag ...; next")` |
+| `order_dialogue` | Dialogue turns (`cdk-drag`) | `efekta batch "solve order; next" --json -c` *(or `drag item-2 item-1; next`)* | `efekta_solve(strategy="order")` |
+| `human_verification_required` | Cloudflare Turnstile / reCAPTCHA | **STOP & ask user** to verify manually in browser | — |
 
 ---
 
@@ -237,10 +239,11 @@ cd efekta-cli
 # Run tests
 make test
 
-# Build static binary
+# Build static binary (./bin/efekta) & install (~/.local/bin/efekta)
 make build
+make install
 
-# Build cross-platform release binaries (Linux, macOS, Windows)
+# Build cross-platform release binaries (./dist/: Linux, macOS, Windows)
 make release
 ```
 

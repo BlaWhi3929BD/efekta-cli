@@ -154,7 +154,7 @@ func getToolDefinitions() []map[string]interface{} {
 	return []map[string]interface{}{
 		{
 			"name":        "efekta_status",
-			"description": "Inspect the current learn.better.efekta.com lesson page. Returns exerciseType (multiple_choice, fill_in_the_blanks, order_sentence, categorize_columns, speaking_avatar), prompt, contextText with inline [input-N]/[slot-N] markers, feedback, video status, canProceed flag, and agentHint with pre-built actions.",
+			"description": "Inspect the current learn.better.efekta.com lesson page. Returns exerciseType (multiple_choice, progress_test_choice, selection_gaps, fill_in_the_blanks, matching_pairs, categorize_columns, order_sentence, order_dialogue, writing_essay, speaking_practice, speaking_avatar, video_stage, passive_screen, lesson_overview, lesson_completed, human_verification_required), prompt, contextText with inline [input-N]/[slot-N] markers, feedback, video status, canProceed flag, and agentHint.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -285,13 +285,13 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_wait",
-			"description": "Wait for a condition ('video-end' to wait until AI video avatar finishes talking, 'next' to wait until Next button unlocks, or milliseconds like '350').",
+			"description": "Wait for a condition ('video-end' to wait until AI video avatar finishes talking, 'next' to wait until Next button unlocks, 'unlocked' to clear cooldown locks, or duration like '350', '350ms', '2s').",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"condition": map[string]interface{}{
 						"type":        "string",
-						"description": "'video-end', 'next', or duration in milliseconds (e.g. '350')",
+						"description": "'video-end', 'next', 'unlocked', or duration (e.g. '350', '1500ms', '2s')",
 					},
 				},
 				"required": []string{"condition"},
@@ -368,7 +368,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_batch",
-			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2, word3', 'speak all', 'next' (auto-fast-forwards through passive screens), plus click, drag, type, press, scroll, wait, solve.",
+			"description": "Execute a semicolon-separated sequence of Turbo commands in one roundtrip and return the new page state. Supports: 'lesson U2L1; auto' (cross-frame launch + autopilot), 'pick opt-1,opt-3', 'pair slot-1:item-3, slot-2:item-1', 'sort slot-1:item-1,item-2', 'gaps word1, word2', 'sequence auto', 'essay', 'dialogue', 'speak all', 'skip', 'next', plus click, drag, type, press, scroll, wait (supports ms/s and conditions), eval, and solve.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
