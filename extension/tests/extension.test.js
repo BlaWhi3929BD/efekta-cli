@@ -225,6 +225,15 @@ class FakeElement {
     return null;
   }
 
+  contains(other) {
+    let cur = other;
+    while (cur) {
+      if (cur === this) return true;
+      cur = cur.parentElement;
+    }
+    return false;
+  }
+
   querySelectorAll(selector) {
     const results = [];
     const walk = (node) => {
@@ -1412,4 +1421,537 @@ test("executeLesson resumes from /gap/ui/home directly into lesson view", async 
   assert.equal(res.success, true);
   assert.equal(clickedContinue, true);
   assert.match(res.message, /Resumed active lesson/i);
+});
+
+test("regular lesson .option-button.not-assessed is NOT Progress Test and deduplicates tap-option wrappers", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  let pickedRight = false;
+
+  const instr = new h.FakeElement("h3", { text: "View activity instructions" });
+  const dbg = new h.FakeElement("p", { text: "Debugging details" });
+  const moreBtn = new h.FakeElement("button", { className: "more-options-button", text: "" });
+  const nextBtn = new h.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+
+  const wrap1 = new h.FakeElement("ef-multiple-choice-tap-task-response-option", { className: "tap-option" });
+  const opt1 = new h.FakeElement("button", {
+    className: "option-button not-assessed",
+    text: "Wrong choice",
+    onclick() {
+      opt1.classList.add("incorrect");
+    }
+  });
+  wrap1.appendChild(opt1);
+
+  const wrap2 = new h.FakeElement("ef-multiple-choice-tap-task-response-option", { className: "tap-option" });
+  const opt2 = new h.FakeElement("button", {
+    className: "option-button not-assessed",
+    text: "Right choice",
+    onclick() {
+      pickedRight = true;
+      opt2.classList.add("correct");
+      nextBtn.disabled = false;
+    }
+  });
+  wrap2.appendChild(opt2);
+
+  h.doc.body.appendChild(instr);
+  h.doc.body.appendChild(dbg);
+  h.doc.body.appendChild(moreBtn);
+  h.doc.body.appendChild(wrap1);
+  h.doc.body.appendChild(wrap2);
+  h.doc.body.appendChild(nextBtn);
+
+  const st = await h.dispatchCommand({ action: "status" });
+  assert.equal(st.success, true);
+  assert.equal(st.data.isProgressTest, false);
+  assert.equal(st.data.exerciseType, "multiple_choice");
+  assert.deepEqual(Array.from(st.data.agentHint.options), ["opt-1: Wrong choice", "opt-2: Right choice"]);
+  assert.equal(st.data.prompt, "");
+  assert.equal(st.data.contextText.includes("Debugging details"), false);
+
+  const sol = await h.dispatchCommand({ action: "solve_choice" });
+  assert.equal(sol.success, true);
+  assert.equal(pickedRight, true);
+});
+
+test("table contextText includes rows/inputs, excludes column-header slots, and executeGaps clicks button.typing-status", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const committed = [];
+
+  const table = new h.FakeElement("table");
+  const hdrRow = new h.FakeElement("tr");
+  const th1 = new h.FakeElement("th");
+  th1.appendChild(new h.FakeElement("ef-stimulus", { className: "column-header", text: "Verb" }));
+  const th2 = new h.FakeElement("th");
+  th2.appendChild(new h.FakeElement("ef-stimulus", { className: "column-header", text: "Noun" }));
+  hdrRow.appendChild(th1);
+  hdrRow.appendChild(th2);
+  table.appendChild(hdrRow);
+
+  const nextBtn = new h.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+
+  const makeRow = (expected, nounText) => {
+    const tr = new h.FakeElement("tr");
+    const td1 = new h.FakeElement("td");
+    const gapWrap = new h.FakeElement("ef-gapfill-item", { className: "gap-item" });
+    const inp = new h.FakeElement("input", { attrs: { type: "text" }, value: "" });
+    const submitBtn = new h.FakeElement("button", {
+      className: "typing-status",
+      text: "Check",
+      onclick() {
+        committed.push(inp.value);
+        inp.remove();
+        submitBtn.remove();
+        if (committed.length === 2) nextBtn.disabled = false;
+      }
+    });
+    gapWrap.appendChild(inp);
+    gapWrap.appendChild(submitBtn);
+    td1.appendChild(gapWrap);
+    const td2 = new h.FakeElement("td", { text: nounText });
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    return tr;
+  };
+
+  table.appendChild(makeRow("propose", "proposal"));
+  table.appendChild(makeRow("resign", "resignation"));
+  h.doc.body.appendChild(table);
+  h.doc.body.appendChild(nextBtn);
+
+  const st = await h.dispatchCommand({ action: "status" });
+  assert.equal(st.data.exerciseType, "fill_in_the_blanks");
+  assert.deepEqual(Array.from(st.data.agentHint.slots), []);
+  assert.ok(st.data.contextText.includes("Verb | Noun"));
+  assert.ok(st.data.contextText.some((line) => line.includes("[input-1]") && line.includes("proposal")));
+  assert.ok(st.data.contextText.some((line) => line.includes("[input-2]") && line.includes("resignation")));
+
+  const gRes = await h.dispatchCommand({ action: "gaps", target: "propose, resign" });
+  assert.equal(gRes.success, true);
+  assert.deepEqual(committed, ["propose", "resign"]);
+  assert.equal(gRes.data.canProceed, true);
+});
+
+test("autoPeekSelectionGapOptions peeks per-slot drawers, closes cleanly, and executeGaps handles stale drawers", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const slotMenus = {
+    s1: ["proposed", "budgeted"],
+    s2: ["morale", "further"]
+  };
+  let openSlot = null;
+  const drawerContainer = new h.FakeElement("div", { className: "drawer-options" });
+  const filledValues = {};
+  const nextBtn = new h.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+
+  const renderDrawer = (slotKey, gapBtn) => {
+    drawerContainer.children = [];
+    drawerContainer.childNodes = [];
+    if (!slotKey) return;
+    for (const word of slotMenus[slotKey]) {
+      const opt = new h.FakeElement("div", {
+        className: "drawer-option",
+        text: word,
+        onclick() {
+          filledValues[slotKey] = word;
+          gapBtn.remove();
+          openSlot = null;
+          renderDrawer(null, null);
+          if (Object.keys(filledValues).length === 2) nextBtn.disabled = false;
+        }
+      });
+      drawerContainer.appendChild(opt);
+    }
+  };
+
+  const makeGap = (slotKey) => {
+    const btn = new h.FakeElement("button", {
+      className: "selection-gap-button",
+      text: "Blank 1 of 1",
+      onclick() {
+        if (openSlot === slotKey) {
+          openSlot = null;
+          renderDrawer(null, null);
+        } else {
+          openSlot = slotKey;
+          renderDrawer(slotKey, btn);
+        }
+      }
+    });
+    return btn;
+  };
+
+  h.doc.body.appendChild(makeGap("s1"));
+  h.doc.body.appendChild(makeGap("s2"));
+  h.doc.body.appendChild(drawerContainer);
+  h.doc.body.appendChild(nextBtn);
+
+  const st = await h.dispatchCommand({ action: "status" });
+  assert.equal(st.data.exerciseType, "selection_gaps");
+  assert.deepEqual(Array.from(st.data.agentHint.options), [
+    "slot-1: proposed | budgeted",
+    "slot-2: morale | further"
+  ]);
+  assert.equal(openSlot, null, "autoPeek must close drawer cleanly after inspecting all slots");
+
+  const gRes = await h.dispatchCommand({ action: "gaps", target: "proposed, morale" });
+  assert.equal(gRes.success, true);
+  assert.deepEqual(filledValues, { s1: "proposed", s2: "morale" });
+  assert.equal(gRes.data.canProceed, true);
+});
+
+test("video_stage mutes video before play() and falls back to ended event when autoplay is blocked", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const nextBtn = new h.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  const video = new h.FakeElement("video");
+  video.duration = 84.33;
+  video.currentTime = 10;
+  video.paused = true;
+  video.ended = false;
+  video.muted = false;
+  let playAttemptedMuted = false;
+  video.play = () => {
+    playAttemptedMuted = !!video.muted;
+    return Promise.reject(new Error("NotAllowedError"));
+  };
+  video.addEventListener("ended", () => {
+    video.ended = true;
+    nextBtn.disabled = false;
+  });
+
+  h.doc.body.appendChild(video);
+  h.doc.body.appendChild(nextBtn);
+
+  const res = await h.dispatchCommand({ action: "next", amount: 1 });
+  assert.equal(res.success, true);
+  assert.equal(playAttemptedMuted, true, "video must be muted before calling play()");
+  assert.equal(video.ended, true);
+  assert.equal(video.currentTime, 84.33);
+});
+
+test("lesson_completed stops autopilot cleanly and executeLesson extracts currentLevel across multiple .sticky nodes", async () => {
+  const h1 = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const s1 = new h1.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 1 Passed" });
+  const s2 = new h1.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 2 Passed" });
+  h1.doc.body.appendChild(s1);
+  h1.doc.body.appendChild(s2);
+
+  const autoRes = await h1.dispatchCommand({ action: "autopilot" });
+  assert.equal(autoRes.success, true);
+  assert.equal(autoRes.stoppedAt, "lesson_completed");
+  assert.equal(autoRes.data.exerciseType, "lesson_completed");
+
+  const h2 = loadContentHarness("https://learn.better.efekta.com/gap/ui/self-study");
+  h2.doc.body.appendChild(new h2.FakeElement("div", { className: "sticky", text: "Efekta Navigation" }));
+  const lvlBar = new h2.FakeElement("div", { className: "sticky" });
+  lvlBar.appendChild(new h2.FakeElement("button", { text: "Level 10" }));
+  h2.doc.body.appendChild(lvlBar);
+  const sec = new h2.FakeElement("div", { attrs: { "data-id": "selfStudy-level-view-list-section-unit-1" } });
+  sec.appendChild(new h2.FakeElement("h2", { attrs: { "data-id": "unit-1" }, text: "Meetings" }));
+  const card = new h2.FakeElement("div", { attrs: { role: "link", "aria-label": "Lesson 1 of 4, Opening" } });
+  card.appendChild(new h2.FakeElement("h3", { attrs: { "data-id": "u1l1-title" }, text: "Opening" }));
+  sec.appendChild(card);
+  h2.doc.body.appendChild(sec);
+
+  const listRes = await h2.dispatchCommand({ action: "lesson", target: "list" });
+  assert.equal(listRes.success, true);
+  assert.equal(listRes.data.currentLevel, "Level 10");
+});
+
+test("background.js excludes catalyst-enter/Turnstile/reCAPTCHA, redacts JWT tokens, and reports human_verification_required", async () => {
+  const executedTargets = [];
+  const h = loadBackgroundHarness({
+    tabs: [
+      {
+        id: 20,
+        active: true,
+        url: "https://learn.better.efekta.com/gap/ui/self-study/lesson-view?token=eyJhbGciOiJSUzI1NiJ9.secret"
+      }
+    ],
+    getFrames: () => [
+      { frameId: 0, url: "https://learn.better.efekta.com/gap/ui/self-study/lesson-view?token=eyJsecret" },
+      {
+        frameId: 5,
+        url: "https://catalyst-enter.better.efekta.com/?redirect_uri=https%3A%2F%2Flesson-player.study.better.efekta.com%2F"
+      },
+      { frameId: 6, url: "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/turnstile" },
+      { frameId: 7, url: "https://www.google.com/recaptcha/api2/anchor" }
+    ],
+    onSendMessage: (tabId, req, options) => {
+      if (options.frameId === 0) {
+        return { success: true, data: { elementsCount: 0, exerciseType: "unknown" } };
+      }
+      return { success: false, error: "should never message auth frames" };
+    }
+  });
+  h.sandbox.chrome.scripting.executeScript = async (cfg) => {
+    executedTargets.push(cfg);
+  };
+
+  const ws = h.FakeWebSocket.lastInstance;
+  await ws.onmessage({ data: JSON.stringify({ id: "req-hv", action: "status" }) });
+  assert.equal(ws.sent.length, 1);
+  assert.equal(ws.sent[0].success, true);
+  assert.equal(ws.sent[0].data.exerciseType, "human_verification_required");
+  // Must NEVER inject into frames 5, 6, or 7
+  for (const cfg of executedTargets) {
+    assert.ok(!cfg.target.frameIds.includes(5));
+    assert.ok(!cfg.target.frameIds.includes(6));
+    assert.ok(!cfg.target.frameIds.includes(7));
+  }
+
+  // Popup status must redact JWT query parameters
+  const popupSt = await h.sendRuntimeMessage({ type: "POPUP_GET_STATUS" });
+  assert.equal(popupSt.tabUrl.includes("eyJhbGci"), false);
+  assert.ok(popupSt.tabUrl.includes("REDACTED"));
+});
+
+test("autopilot autonomously solves selection_gaps, categorize_columns, matching_pairs, order_dialogue, and Verb/Noun table blanks on regular lessons", async () => {
+  // 1. Autonomous categorize_columns solver
+  const hSort = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const nextSort = new hSort.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  const correctSlotFor = { "I agree": "agreeing", "I disagree": "disagreeing" };
+  let lastPickedItem = null;
+
+  const makeSortItem = (label) => {
+    const btn = new hSort.FakeElement("button", {
+      className: "item option",
+      text: label,
+      onclick() {
+        lastPickedItem = btn;
+      }
+    });
+    return btn;
+  };
+  const itemA = makeSortItem("I agree");
+  const itemB = makeSortItem("I disagree");
+
+  const makeSortSlot = (cat) =>
+    new hSort.FakeElement("button", {
+      className: "item target",
+      text: cat,
+      onclick() {
+        if (!lastPickedItem) return;
+        if (correctSlotFor[lastPickedItem.textContent] === cat) {
+          lastPickedItem.remove();
+          lastPickedItem = null;
+          if (!itemA.isConnected && !itemB.isConnected) nextSort.disabled = false;
+        } else {
+          lastPickedItem.classList.add("incorrect");
+          setTimeout(() => lastPickedItem && lastPickedItem.classList.remove("incorrect"), 40);
+        }
+      }
+    });
+
+  hSort.doc.body.appendChild(makeSortSlot("disagreeing"));
+  hSort.doc.body.appendChild(makeSortSlot("agreeing"));
+  hSort.doc.body.appendChild(itemA);
+  hSort.doc.body.appendChild(itemB);
+  hSort.doc.body.appendChild(nextSort);
+
+  const sortRes = await hSort.dispatchCommand({ action: "solve_sort" });
+  assert.equal(sortRes.success, true);
+  assert.equal(nextSort.disabled, false);
+
+  // 2. Autonomous matching_pairs solver
+  const hPair = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const nextPair = new hPair.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  const pairMap = { task: "job", rumor: "gossip" };
+  let activeLeft = null;
+  let matchedCount = 0;
+
+  const makeLeft = (word) => {
+    const el = new hPair.FakeElement("div", {
+      className: "matching-option-wp target",
+      text: word,
+      onclick() {
+        activeLeft = el;
+      }
+    });
+    return el;
+  };
+  const makeRight = (word) => {
+    const el = new hPair.FakeElement("div", {
+      className: "matching-option-wp option",
+      text: word,
+      onclick() {
+        if (!activeLeft) return;
+        if (pairMap[activeLeft.textContent] === word) {
+          activeLeft.classList.add("correct");
+          el.classList.add("correct");
+          matchedCount++;
+          if (matchedCount === 2) nextPair.disabled = false;
+        } else {
+          activeLeft.classList.add("incorrect");
+          el.classList.add("incorrect");
+          const l = activeLeft;
+          setTimeout(() => {
+            l.classList.remove("incorrect");
+            el.classList.remove("incorrect");
+          }, 40);
+        }
+      }
+    });
+    return el;
+  };
+
+  hPair.doc.body.appendChild(makeLeft("task"));
+  hPair.doc.body.appendChild(makeLeft("rumor"));
+  hPair.doc.body.appendChild(makeRight("gossip"));
+  hPair.doc.body.appendChild(makeRight("job"));
+  hPair.doc.body.appendChild(nextPair);
+
+  const pairRes = await hPair.dispatchCommand({ action: "solve_pair" });
+  assert.equal(pairRes.success, true);
+  assert.equal(nextPair.disabled, false);
+
+  // 3. Autonomous order_dialogue (ef-sequencing-task) solver with per-slot .is-unassessed locking
+  const hOrd = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const targetOrder = ["first proposal", "second proposal", "third proposal"];
+  const seqTask = new hOrd.FakeElement("ef-sequencing-task");
+
+  const makeSeqItem = (text) => {
+    const item = new hOrd.FakeElement("ef-sequencing-sort-column-item", { className: "drop-list-item" });
+    const drag = new hOrd.FakeElement("div", { className: "cdk-drag list-item is-unassessed", text });
+    item.appendChild(drag);
+    return item;
+  };
+  seqTask.appendChild(makeSeqItem("second proposal"));
+  seqTask.appendChild(makeSeqItem("third proposal"));
+  seqTask.appendChild(makeSeqItem("first proposal"));
+
+  // Handle cdkSort bridge message in fake DOM (matching how injected.js reorders ef-sequencing-sort-column-item)
+  hOrd.doc.addEventListener("efekta:in", (ev) => {
+    const req = JSON.parse(ev.detail);
+    if (req.type === "cdkSort") {
+      const srcEl = seqTask.children.find((c) => c.getAttribute("data-efekta-id") === req.srcId);
+      const dstEl = seqTask.children.find((c) => c.getAttribute("data-efekta-id") === req.dstId);
+      if (srcEl && dstEl && srcEl !== dstEl) {
+        const idxA = seqTask.children.indexOf(srcEl);
+        const idxB = seqTask.children.indexOf(dstEl);
+        seqTask.children.splice(idxA, 1);
+        seqTask.children.splice(idxB, 0, srcEl);
+        seqTask.childNodes = seqTask.children.slice();
+      }
+      hOrd.doc.dispatchEvent({
+        type: "efekta:out",
+        detail: JSON.stringify({ reqId: req.reqId, ok: true, result: true })
+      });
+    }
+  });
+
+  const checkOrdBtn = new hOrd.FakeElement("button", {
+    className: "check-task-button next-task-button",
+    text: "Check",
+    onclick() {
+      let allCorrect = true;
+      seqTask.children.forEach((child, idx) => {
+        const dragDiv = child.querySelector(".cdk-drag");
+        if (child.textContent.trim() === targetOrder[idx]) {
+          if (dragDiv) dragDiv.classList.remove("is-unassessed");
+        } else {
+          allCorrect = false;
+        }
+      });
+      if (allCorrect) {
+        checkOrdBtn.childNodes = [];
+        checkOrdBtn.appendText("Next");
+      }
+    }
+  });
+  hOrd.doc.body.appendChild(seqTask);
+  hOrd.doc.body.appendChild(checkOrdBtn);
+
+  const ordRes = await hOrd.dispatchCommand({ action: "solve_order" });
+  assert.equal(ordRes.success, true);
+  assert.deepEqual(
+    seqTask.children.map((c) => c.textContent.trim()),
+    targetOrder
+  );
+
+  // 4. Autonomous fill_in_the_blanks Verb/Noun table solver
+  const hTbl = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const tbl = new hTbl.FakeElement("table");
+  const nextTbl = new hTbl.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  let solvedRows = 0;
+
+  const addWordFamilyRow = (expectedVerb, givenNoun) => {
+    const tr = new hTbl.FakeElement("tr");
+    const td1 = new hTbl.FakeElement("td");
+    const gap = new hTbl.FakeElement("ef-gapfill-item");
+    const inp = new hTbl.FakeElement("input", { attrs: { type: "text" }, value: "" });
+    const btn = new hTbl.FakeElement("button", {
+      className: "typing-status",
+      text: "Check",
+      onclick() {
+        if ((inp.value || "").toLowerCase() === expectedVerb) {
+          inp.remove();
+          btn.remove();
+          td1.appendText(expectedVerb);
+          solvedRows++;
+          if (solvedRows === 2) nextTbl.disabled = false;
+        }
+      }
+    });
+    gap.appendChild(inp);
+    gap.appendChild(btn);
+    td1.appendChild(gap);
+    const td2 = new hTbl.FakeElement("td", { text: givenNoun });
+    tr.appendChild(td1);
+    tr.appendChild(td2);
+    tbl.appendChild(tr);
+  };
+  addWordFamilyRow("propose", "proposal");
+  addWordFamilyRow("resign", "resignation");
+  hTbl.doc.body.appendChild(tbl);
+  hTbl.doc.body.appendChild(nextTbl);
+
+  const tblRes = await hTbl.dispatchCommand({ action: "solve_gaps" });
+  assert.equal(tblRes.success, true);
+  assert.equal(solvedRows, 2);
+  assert.equal(nextTbl.disabled, false);
+});
+
+test("step activity planner jumps to incomplete activity on Step not passed and speaks drill when needed for >50% pass threshold", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  let jumpedToAct3 = false;
+
+  const nav = new h.FakeElement("ef-activity-navigator");
+  nav.appendChild(
+    new h.FakeElement("div", {
+      className: "wp",
+      text: "Step navigation, Activity 1 of 4, Activity complete"
+    })
+  );
+  nav.appendChild(
+    new h.FakeElement("div", {
+      className: "wp",
+      text: "Step navigation, Activity 2 of 4, Activity complete"
+    })
+  );
+  const act3 = new h.FakeElement("div", {
+    className: "wp",
+    text: "Step navigation, Activity 3 of 4, 0% complete",
+    onclick() {
+      jumpedToAct3 = true;
+      promptEl.childNodes = [];
+      promptEl.appendText("Lesson completed");
+      h.doc.body.appendChild(new h.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 1 Passed" }));
+      h.doc.body.appendChild(new h.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 2 Passed" }));
+      nav.remove();
+    }
+  });
+  nav.appendChild(act3);
+  nav.appendChild(
+    new h.FakeElement("div", {
+      className: "wp selected",
+      text: "Step summary"
+    })
+  );
+  const promptEl = new h.FakeElement("h2", { text: "Step not passed. Pass at least 3 activities to pass this step!" });
+  h.doc.body.appendChild(nav);
+  h.doc.body.appendChild(promptEl);
+
+  const res = await h.dispatchCommand({ action: "autopilot", target: "3" });
+  assert.equal(res.success, true);
+  assert.equal(jumpedToAct3, true);
 });
