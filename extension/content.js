@@ -70,7 +70,7 @@
     };
     registerFrame("FRAME_REGISTER");
     if (window.location && window.location.protocol === "https:" && typeof setInterval === "function") {
-      setInterval(() => registerFrame("FRAME_PING"), 10000);
+      setInterval(() => registerFrame("FRAME_PING"), 5000);
     }
   } catch (_) {}
 
@@ -2079,11 +2079,19 @@
     return updated;
   }
 
-  // Wait for a condition ("video-end", "next", "unlocked", or duration in ms)
+  // Wait for a condition ("video-end", "next", "unlocked", or duration like "350", "350ms", "2s")
   async function waitForCondition(condition, timeoutMs = 15000) {
     const start = Date.now();
-    if (!condition || /^\d+$/.test(String(condition))) {
-      const ms = parseInt(condition, 10) || 200;
+    const rawStr = String(condition || "").trim();
+    if (!rawStr) {
+      await sleep(200);
+      return { success: true, message: "Waited 200ms" };
+    }
+    const durMatch = rawStr.match(/^(\d+(?:\.\d+)?)\s*(ms|s)?$/i);
+    if (durMatch) {
+      const val = parseFloat(durMatch[1]);
+      const unit = (durMatch[2] || "ms").toLowerCase();
+      const ms = Number.isFinite(val) ? Math.max(0, Math.round(unit === "s" ? val * 1000 : val)) : 200;
       await sleep(ms);
       return { success: true, message: `Waited ${ms}ms` };
     }
@@ -4752,8 +4760,12 @@
         return await solveMatchingPairs();
       case "order_dialogue":
         return await solveOrderDialogue();
-      case "order_sentence":
-        return await executeSequence("auto");
+      case "order_sentence": {
+        const isTapSeq = getAllDocs().some((d) =>
+          d.querySelector("ef-sequencing-tap-option-task")
+        );
+        return isTapSeq ? await solveOrderSentence() : await executeSequence("auto");
+      }
       case "fill_in_the_blanks":
         return await solveFillInTheBlanks([]);
       case "writing_essay":
@@ -5476,11 +5488,29 @@
     }
 
     await sleep(100);
+    let clickedCheck = false;
     for (const doc of docs) {
       const checkBtn = doc.querySelector("button.check-task-button, button.next-task-button");
       if (checkBtn && isVisible(checkBtn) && !checkBtn.disabled) {
         await simulateClick(checkBtn);
+        clickedCheck = true;
         break;
+      }
+    }
+
+    if (clickedCheck) {
+      const seqWaitStart = Date.now();
+      while (Date.now() - seqWaitStart < 1800) {
+        await sleep(50);
+        const curSt = inspectState();
+        if (curSt.canProceed && !isCheckOrSubmitButton(curSt)) break;
+        const poolNow = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
+        if (
+          poolNow.length > 0 &&
+          Array.from(orderedList.querySelectorAll("button.is-unassessed, .is-unassessed")).length === 0
+        ) {
+          break;
+        }
       }
     }
 
@@ -5488,6 +5518,170 @@
       success: clicked.length > 0,
       message: `Sequenced ${clicked.length} tokens: ${clicked.join(" ")}`,
       clicked
+    };
+  }
+
+  // Solver 9: Autonomous Order-Sentence Solver (ef-sequencing-tap-option-task)
+  // After Check, Catalyst permanently locks the contiguous correct prefix in ol.ordered-item-container
+  // and returns the mismatched suffix back to ul.unordered-item-container.
+  async function solveOrderSentence() {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve sentence') is strictly disabled on formal assessments."
+      };
+    }
+    await dismissOverlaysIfPresent();
+    const docs = getAllDocs();
+    let orderedList = null;
+    let unorderedList = null;
+    for (const doc of docs) {
+      const container = doc.querySelector("ef-sequencing-tap-option-task");
+      if (container) {
+        orderedList = container.querySelector(".ordered-item-container, ol");
+        unorderedList = container.querySelector(".unordered-item-container, ul");
+        break;
+      }
+    }
+    if (!orderedList || !unorderedList) {
+      return { success: false, message: "No tap-sequencing container found" };
+    }
+
+    const norm = (s) => String(s || "").replace(/\\/g, "").replace(/['’`"]/g, "'").trim().toLowerCase();
+    const getPoolBtns = () =>
+      Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
+    const getUnassessedOrderedBtns = () =>
+      Array.from(orderedList.querySelectorAll("button.item, button")).filter((b) => {
+        if (!isVisible(b) || b.disabled) return false;
+        const cls = getClassName(b).toLowerCase();
+        const pCls = b.parentElement ? getClassName(b.parentElement).toLowerCase() : "";
+        return !cls.includes("correct") && !cls.includes("is-correct") && !pCls.includes("correct");
+      });
+    const getLockedPrefixLen = () => {
+      const lis = Array.from(orderedList.children || []).filter((li) => isVisible(li));
+      return lis.filter((li) => {
+        const txt = cleanText(li);
+        if (!txt) return false;
+        const cls = getClassName(li).toLowerCase();
+        if (cls.includes("is-unassessed")) return false;
+        return !li.querySelector(".is-unassessed");
+      }).length;
+    };
+    const findCheckBtn = () => {
+      for (const doc of docs) {
+        const btn = Array.from(
+          doc.querySelectorAll("button.check-task-button, button.next-task-button")
+        ).find((b) => isVisible(b) && /\b(check|submit|проверить)\b/i.test(cleanText(b)));
+        if (btn) return btn;
+      }
+      return null;
+    };
+
+    // Return any pre-placed unlocked tokens back into the pool first
+    const prePlaced = getUnassessedOrderedBtns();
+    for (let i = prePlaced.length - 1; i >= 0; i--) {
+      await simulateClick(prePlaced[i]);
+      await sleep(40);
+    }
+    if (prePlaced.length > 0) await sleep(80);
+
+    const triedByPos = new Map();
+    let rounds = 0;
+
+    for (let guard = 0; guard < 32; guard++) {
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) {
+        return { success: true, message: `Auto-sequenced sentence in ${rounds} round(s)`, rounds };
+      }
+
+      let pool = getPoolBtns();
+      if (pool.length === 0) {
+        const ck = findCheckBtn();
+        if (ck && !ck.disabled) {
+          await simulateClick(ck);
+          rounds++;
+          const w0 = Date.now();
+          while (Date.now() - w0 < 1800) {
+            await sleep(45);
+            const cur = inspectState();
+            if (cur.canProceed && !isCheckOrSubmitButton(cur)) {
+              return { success: true, message: `Auto-sequenced sentence in ${rounds} round(s)`, rounds };
+            }
+            if (getPoolBtns().length > 0) break;
+          }
+          pool = getPoolBtns();
+        }
+        if (pool.length === 0) break;
+      }
+
+      const pos = getLockedPrefixLen();
+      if (!triedByPos.has(pos)) triedByPos.set(pos, new Set());
+      const triedAtPos = triedByPos.get(pos);
+
+      const scored = pool.map((el, idx) => {
+        const text = cleanText(el);
+        const key = norm(text);
+        const isTerminalPunct = /[.?!…]+["'”’)]*$/.test(text);
+        const isCapNonEnd = /^[A-Z]/.test(text) && !isTerminalPunct;
+        const alreadyTried = triedAtPos.has(key);
+        let rank = 0;
+        if (alreadyTried) rank += 100;
+        if (pos === 0 && isCapNonEnd) rank -= 20;
+        if (pool.length > 1 && isTerminalPunct) rank += 10;
+        return { el, text, key, isTerminalPunct, rank, idx };
+      });
+      scored.sort((a, b) => a.rank - b.rank || a.idx - b.idx);
+
+      let head = scored[0];
+      if (triedAtPos.size > 0 && head.rank >= 100) {
+        triedAtPos.clear();
+      }
+      if (head.key) triedAtPos.add(head.key);
+
+      // Put non-terminal tokens before terminal punctuation tokens in the filler tail
+      const tail = scored
+        .filter((x) => x !== head)
+        .sort((a, b) => Number(a.isTerminalPunct) - Number(b.isTerminalPunct) || a.idx - b.idx);
+
+      const trialOrder = [head, ...tail];
+      for (const tok of trialOrder) {
+        if (!tok.el.isConnected) continue;
+        await simulateClick(tok.el);
+        await sleep(45);
+      }
+      await sleep(70);
+
+      const checkBtn = findCheckBtn();
+      if (!checkBtn || checkBtn.disabled) break;
+      await simulateClick(checkBtn);
+      rounds++;
+
+      const wStart = Date.now();
+      while (Date.now() - wStart < 1800) {
+        await sleep(45);
+        const curSt = inspectState();
+        if (curSt.canProceed && !isCheckOrSubmitButton(curSt)) {
+          return { success: true, message: `Auto-sequenced sentence in ${rounds} round(s)`, rounds };
+        }
+        const nowPool = getPoolBtns();
+        if (
+          nowPool.length > 0 &&
+          Array.from(orderedList.querySelectorAll("button.is-unassessed, .is-unassessed")).length === 0
+        ) {
+          await sleep(70);
+          break;
+        }
+      }
+    }
+
+    const endSt = inspectState();
+    const solved = endSt.canProceed && !isCheckOrSubmitButton(endSt);
+    return {
+      success: solved,
+      message: solved
+        ? `Auto-sequenced sentence in ${rounds} round(s)`
+        : `Tested ${rounds} sentence ordering round(s); inspect agentHint.items`,
+      rounds
     };
   }
 
@@ -5619,6 +5813,29 @@
         continue;
       }
 
+      // 3) Smart step skip: if >50% of activities in this multi-activity regular step are ALREADY 100%,
+      // jump directly to Step Summary BEFORE running any slower solvers!
+      if (
+        !st.isProgressTest &&
+        !isAvatarContext(st) &&
+        t !== "speaking_avatar" &&
+        isInteractiveExercise(st) &&
+        stepPlan &&
+        stepPlan.total >= 2 &&
+        stepPlan.stepAlreadyPassable &&
+        stepPlan.summaryEl &&
+        !jumpedToActivities.has(stepPlan.summaryEl.id)
+      ) {
+        jumpedToActivities.add(stepPlan.summaryEl.id);
+        const sumEl = resolveElement(stepPlan.summaryEl.id);
+        if (sumEl) {
+          await simulateClick(sumEl);
+          await sleep(350);
+          steps.push(`step-planner: step already passable (${stepPlan.passedCount}/${stepPlan.total}), skipping directly to ${stepPlan.summaryEl.id}`);
+          continue;
+        }
+      }
+
       if (isAvatarContext(st)) {
         const r = await executeDialogue("");
         steps.push(`dialogue: ${r.message}`);
@@ -5728,9 +5945,19 @@
 
       if (t === "order_sentence") {
         const isTapSeq = getAllDocs().some((d) =>
-          d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+          d.querySelector("ef-sequencing-tap-option-task")
         );
         if (isTapSeq) {
+          const r = await solveOrderSentence();
+          if (r.success) {
+            steps.push(`solved order sentence: ${r.message}`);
+            const n = await executeAutoNext(9);
+            (n.autoReadNotes || []).forEach((x) => notes.push(x));
+            continue;
+          }
+        } else if (
+          getAllDocs().some((d) => d.querySelector(".ordered-item-container"))
+        ) {
           const r = await executeSequence("auto");
           if (r.success) {
             steps.push(`sequenced: ${r.message}`);
@@ -5776,7 +6003,7 @@
 
         if (isInLessonPlayer) {
           const n = await executeAutoNext(9);
-          if (n.hops > 0 || n.success) {
+          if ((n.hops || 0) > 0) {
             steps.push(`next: ${n.message}`);
             (n.autoReadNotes || []).forEach((x) => notes.push(x));
             continue;
@@ -5795,6 +6022,11 @@
               }
             }
           }
+          return finish({
+            needsAgent: true,
+            stoppedAt: "unknown",
+            message: "Unknown or transitioning lesson screen - inspect state or retry autopilot."
+          });
         }
 
         if (window.location.pathname.includes("/self-study") || window.location.pathname.includes("/home")) {
@@ -5819,6 +6051,29 @@
           needsAgent: true,
           stoppedAt: "video_stage",
           message: n.error || "Video stage could not be auto-advanced - inspect agentHint."
+        });
+      }
+    }
+    // If budget ended immediately after a long exercise (e.g. avatar dialogue -> "Step passed!"),
+    // finish advancing consecutive unlocked passive screens cleanly so no manual extra 'next' is needed!
+    const tailSt = inspectState();
+    if (
+      tailSt.canProceed &&
+      !isCheckOrSubmitButton(tailSt) &&
+      !tailSt.isProgressTest &&
+      !isAvatarContext(tailSt)
+    ) {
+      const tailNext = await executeAutoNext(4);
+      if ((tailNext.hops || 0) > 0) {
+        steps.push(`next: ${tailNext.message || "advanced"}`);
+        (tailNext.autoReadNotes || []).forEach((x) => notes.push(x));
+      }
+      const afterTailSt = inspectState();
+      if (afterTailSt.exerciseType === "lesson_completed") {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "lesson_completed",
+          message: "Lesson completed (all steps passed)! Run 'efekta lesson next --json -c' to start the next lesson."
         });
       }
     }
@@ -6371,9 +6626,20 @@
       }
       case "solve_sentence": {
         const isTapSeq = getAllDocs().some((d) =>
-          d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+          d.querySelector("ef-sequencing-tap-option-task")
         );
         if (isTapSeq) {
+          const target = (cmd.target || cmd.text || "").trim();
+          if (target && target.toLowerCase() !== "auto") {
+            return await executeSequence(target);
+          }
+          const res = await solveOrderSentence();
+          return { success: res.success, message: res.message, error: res.error, data: res };
+        }
+        const hasOrderedOnly = getAllDocs().some((d) =>
+          d.querySelector(".ordered-item-container")
+        );
+        if (hasOrderedOnly) {
           return await executeSequence(cmd.target || cmd.text || "auto");
         }
         const hasSeqTask = getAllDocs().some((d) =>
