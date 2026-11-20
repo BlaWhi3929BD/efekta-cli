@@ -2,12 +2,12 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -54,22 +54,31 @@ func ServeStream(in io.Reader, out io.Writer, execFn CommandExecutor) error {
 	enc := json.NewEncoder(out)
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
+		line := bytes.TrimSpace(scanner.Bytes())
 		if len(line) == 0 {
 			continue
 		}
 
 		var req rpcRequest
 		if err := json.Unmarshal(line, &req); err != nil {
+			_ = enc.Encode(rpcResponse{
+				JSONRPC: "2.0",
+				ID:      json.RawMessage("null"),
+				Error:   &rpcError{Code: -32700, Message: "Parse error: " + err.Error()},
+			})
 			continue
 		}
 
-		if len(req.ID) == 0 || string(req.ID) == "null" {
+		trimmedID := bytes.TrimSpace(req.ID)
+		if len(trimmedID) == 0 || string(trimmedID) == "null" {
 			continue
 		}
+		req.ID = trimmedID
 
 		resp := handleRPC(req, execFn)
-		_ = enc.Encode(resp)
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
 	}
 	return scanner.Err()
 }
@@ -87,7 +96,7 @@ func handleRPC(req rpcRequest, execFn CommandExecutor) rpcResponse {
 				},
 				"serverInfo": map[string]interface{}{
 					"name":    "efekta-cli-mcp",
-					"version": "2.2.0",
+					"version": "3.0.0",
 				},
 			},
 		}
@@ -171,7 +180,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_autopilot",
-			"description": "BEST FIRST CHOICE inside a lesson. Drives everything that needs no answer knowledge in ONE call: lesson overview, reading cards, videos, summaries, self-evaluation, whole avatar dialogues, optional pronunciation drills (skipped unless speak=true). Stops with needsAgent=true and an agentHint at the first exercise that needs a real answer (multiple choice, matching, gaps, ordering...). After answering, call it again (or end a batch with '; auto').",
+			"description": "BEST FIRST CHOICE inside a lesson. Autonomously handles lesson overview, reading cards, videos, summaries, self-evaluation, regular multiple choice, essays, avatar dialogues, and optional pronunciation drills (skipped unless speak=true). Automatically stops with needsAgent=true and an agentHint on Progress Tests (progress_test_choice) and knowledge exercises (gaps, sort, pair, order_dialogue). After answering, call it again (or end a batch with '; auto').",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -264,7 +273,11 @@ func getToolDefinitions() []map[string]interface{} {
 				"properties": map[string]interface{}{
 					"direction": map[string]interface{}{
 						"type":        "string",
-						"description": "'down', 'up', or pixel amount (e.g. '400')",
+						"description": "'down', 'up', 'up 600', or pixel amount (e.g. '400')",
+					},
+					"amount": map[string]interface{}{
+						"type":        "integer",
+						"description": "Optional pixel offset (default: 400)",
 					},
 				},
 				"required": []string{"direction"},
@@ -436,11 +449,25 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 	case "efekta_press":
 		cmd = protocol.Command{Action: "press", Target: strArg("key")}
 	case "efekta_scroll":
-		dir := strArg("direction")
+		rawDir := strings.TrimSpace(strArg("direction"))
+		dir := "down"
 		amt := 400
-		if n, err := strconv.Atoi(dir); err == nil {
-			amt = n
-			dir = "down"
+		if n, ok := params.Arguments["amount"].(float64); ok && n != 0 {
+			amt = int(n)
+		}
+		fields := strings.Fields(rawDir)
+		if len(fields) >= 1 {
+			first := strings.ToLower(fields[0])
+			if first == "up" || first == "down" {
+				dir = first
+				if len(fields) >= 2 {
+					if n, err := strconv.Atoi(fields[1]); err == nil {
+						amt = n
+					}
+				}
+			} else if n, err := strconv.Atoi(first); err == nil {
+				amt = n
+			}
 		}
 		cmd = protocol.Command{Action: "scroll", Direction: dir, Amount: amt}
 	case "efekta_wait":
@@ -455,6 +482,9 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		cmd = protocol.Command{Action: "speak", Target: txt}
 	case "efekta_batch":
 		subCmds := protocol.ParseBatchString(strArg("commands"))
+		if len(subCmds) == 0 {
+			return "Error: no valid commands parsed from batch string", true
+		}
 		cmd = protocol.Command{Action: "batch", Commands: subCmds}
 	case "efekta_essay":
 		txt := strArg("text")
@@ -475,37 +505,59 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		}
 		cmd = protocol.Command{Action: "lesson", Target: target}
 	case "efekta_solve":
-		strat := strArg("strategy")
+		strat := strings.ToLower(strings.TrimSpace(strArg("strategy")))
 		switch strat {
+		case "choice", "multiple_choice":
+			cmd = protocol.Command{Action: "solve_choice"}
 		case "sentence", "order":
 			cmd = protocol.Command{Action: "solve_sentence"}
-		case "speak", "voice":
+		case "speak", "voice", "dialog", "skip":
 			cmd = protocol.Command{Action: "skip_speaking"}
 		default:
-			cmd = protocol.Command{Action: "solve_choice"}
+			return fmt.Sprintf("Error: unknown solve strategy %q (valid: choice | sentence | speak)", strat), true
 		}
 	case "efekta_screenshot":
-		outPath := strArg("outputPath")
-		if outPath == "" {
-			outPath = filepath.Join(os.TempDir(), "efekta_screenshot.png")
-		}
+		outPath := strings.TrimSpace(strArg("outputPath"))
 		resp, err := execFn(protocol.Command{Action: "screenshot"})
 		if err != nil {
 			return fmt.Sprintf("Error: %v", err), true
+		}
+		if resp == nil {
+			return "Error: empty response from daemon", true
 		}
 		if !resp.Success {
 			return fmt.Sprintf("Error: %s", resp.Error), true
 		}
 		dataMap, ok := resp.Data.(map[string]interface{})
-		if !ok || dataMap["screenshotBase64"] == nil {
+		if !ok {
 			return "Error: no screenshot data returned", true
 		}
-		imgBytes, err := base64.StdEncoding.DecodeString(fmt.Sprintf("%v", dataMap["screenshotBase64"]))
+		b64Str, ok := dataMap["screenshotBase64"].(string)
+		if !ok || b64Str == "" {
+			return "Error: no screenshot data returned", true
+		}
+		imgBytes, err := base64.StdEncoding.DecodeString(b64Str)
 		if err != nil {
 			return fmt.Sprintf("Error decoding screenshot: %v", err), true
 		}
-		if err := os.WriteFile(outPath, imgBytes, 0644); err != nil {
-			return fmt.Sprintf("Error saving screenshot: %v", err), true
+		if outPath == "" {
+			tmpFile, err := os.CreateTemp("", "efekta_screenshot_*.png")
+			if err != nil {
+				return fmt.Sprintf("Error creating temp screenshot: %v", err), true
+			}
+			outPath = tmpFile.Name()
+			if _, writeErr := tmpFile.Write(imgBytes); writeErr != nil {
+				_ = tmpFile.Close()
+				_ = os.Remove(outPath)
+				return fmt.Sprintf("Error saving screenshot: %v", writeErr), true
+			}
+			if closeErr := tmpFile.Close(); closeErr != nil {
+				return fmt.Sprintf("Error closing screenshot: %v", closeErr), true
+			}
+		} else {
+			if err := os.WriteFile(outPath, imgBytes, 0600); err != nil {
+				return fmt.Sprintf("Error saving screenshot: %v", err), true
+			}
 		}
 		b, _ := json.MarshalIndent(map[string]interface{}{
 			"success": true,
@@ -521,13 +573,16 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 	if err != nil {
 		return fmt.Sprintf("Error: %v", err), true
 	}
+	if resp == nil {
+		return "Error: empty response from daemon", true
+	}
 	compact := true
 	if v, ok := params.Arguments["compact"]; ok {
 		if b, ok := v.(bool); ok {
 			compact = b
 		}
 	}
-	if compact && resp != nil && resp.Data != nil {
+	if compact && resp.Data != nil {
 		if m, ok := resp.Data.(map[string]interface{}); ok {
 			delete(m, "elements")
 		}
