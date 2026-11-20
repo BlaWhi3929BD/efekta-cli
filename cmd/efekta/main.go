@@ -101,15 +101,46 @@ func readDaemonLogTail(logPath string) string {
 	return strings.TrimSpace(lines[len(lines)-1])
 }
 
+func resolveExecutablePath(exePath string, statFn func(string) (os.FileInfo, error), lookPathFn func(string) (string, error)) string {
+	const deletedSuffix = " (deleted)"
+	if strings.HasSuffix(exePath, deletedSuffix) {
+		cleaned := strings.TrimSuffix(exePath, deletedSuffix)
+		if info, err := statFn(cleaned); err == nil && !info.IsDir() {
+			return cleaned
+		}
+		if lp, err := lookPathFn("efekta"); err == nil && lp != "" {
+			return lp
+		}
+	}
+	if exePath != "" {
+		return exePath
+	}
+	if lp, err := lookPathFn("efekta"); err == nil && lp != "" {
+		return lp
+	}
+	return "efekta"
+}
+
+func waitForBrowserConnected(healthURL string, timeout time.Duration, pollInterval time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if data, ok := checkDaemonHealth(healthURL); ok && data["browserConnected"] == true {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(pollInterval)
+	}
+}
+
 func ensureDaemon() error {
 	if isDaemonRunning() {
 		return nil
 	}
 
-	exePath, err := os.Executable()
-	if err != nil {
-		exePath = "efekta"
-	}
+	rawExe, _ := os.Executable()
+	exePath := resolveExecutablePath(rawExe, os.Stat, exec.LookPath)
 
 	logPath := daemon.GetLogFilePath()
 	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
@@ -140,6 +171,7 @@ func ensureDaemon() error {
 		select {
 		case waitErr := <-waitCh:
 			if isDaemonRunning() {
+				waitForBrowserConnected(HealthURL, 2500*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 			if tail := readDaemonLogTail(logPath); tail != "" {
@@ -148,6 +180,7 @@ func ensureDaemon() error {
 			return fmt.Errorf("daemon exited during startup (%v) (log: %s)", waitErr, logPath)
 		case <-time.After(100 * time.Millisecond):
 			if isDaemonRunning() {
+				waitForBrowserConnected(HealthURL, 2500*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 		}
@@ -679,7 +712,7 @@ func main() {
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "solve":
-		strategy := "choice"
+		strategy := "auto"
 		if len(posArgs) >= 2 {
 			strategy = strings.ToLower(posArgs[1])
 		}
@@ -688,12 +721,22 @@ func main() {
 		switch strategy {
 		case "choice", "multiple_choice":
 			action = "solve_choice"
-		case "sentence", "order":
+		case "gaps", "fill", "selection_gaps", "fill_in_the_blanks":
+			action = "solve_gaps"
+		case "sort", "categorize", "categorize_columns":
+			action = "solve_sort"
+		case "pair", "match", "matching_pairs":
+			action = "solve_pair"
+		case "order", "order_dialogue", "sequencing":
+			action = "solve_order"
+		case "sentence":
 			action = "solve_sentence"
 		case "speak", "voice", "dialog", "skip":
 			action = "skip_speaking"
+		case "auto", "all":
+			action = "solve_auto"
 		default:
-			outputError(fmt.Errorf("unknown solve strategy: %s. Valid: choice | sentence | speak", strategy), jsonOutput)
+			outputError(fmt.Errorf("unknown solve strategy: %s. Valid: auto | choice | gaps | sort | pair | order | sentence | speak", strategy), jsonOutput)
 			os.Exit(1)
 		}
 
@@ -818,7 +861,12 @@ func handleSimpleResponse(resp *protocol.Response, err error, jsonOut bool) {
 				errMsg = "Command execution failed"
 			}
 		}
-		outputError(fmt.Errorf("%s", errMsg), jsonOut)
+		resp.Error = errMsg
+		if jsonOut {
+			printJSON(resp)
+		} else {
+			outputError(fmt.Errorf("%s", errMsg), false)
+		}
 		os.Exit(1)
 	}
 	if jsonOut {

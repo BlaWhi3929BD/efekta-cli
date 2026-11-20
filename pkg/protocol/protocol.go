@@ -35,6 +35,7 @@ type AgentHint struct {
 	Items          []string `json:"items,omitempty"`
 	Options        []string `json:"options,omitempty"`
 	Inputs         []string `json:"inputs,omitempty"`
+	Activities     []string `json:"activities,omitempty"`
 }
 
 // PageState contains the complete semantic state of the Efekta page

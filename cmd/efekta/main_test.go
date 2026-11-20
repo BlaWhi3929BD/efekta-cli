@@ -3,8 +3,10 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"efekta-cli/pkg/protocol"
 )
@@ -191,5 +193,46 @@ func TestParseOutputFlagRejectsMissingOrFlagPath(t *testing.T) {
 	}
 	if _, err := parseOutputFlag([]string{"screen", "--output"}); err == nil {
 		t.Error("expected error when --output is missing a path")
+	}
+}
+
+func TestResolveExecutablePathHandlesDeletedBinary(t *testing.T) {
+	tmpFile := t.TempDir() + "/efekta"
+	if err := os.WriteFile(tmpFile, []byte("bin"), 0755); err != nil {
+		t.Fatalf("write tmp binary: %v", err)
+	}
+	got := resolveExecutablePath(tmpFile+" (deleted)", os.Stat, func(string) (string, error) {
+		return "/fallback/efekta", nil
+	})
+	if got != tmpFile {
+		t.Fatalf("expected cleaned path %q, got %q", tmpFile, got)
+	}
+
+	gotFallback := resolveExecutablePath("/nonexistent/efekta (deleted)", os.Stat, func(string) (string, error) {
+		return "/usr/local/bin/efekta", nil
+	})
+	if gotFallback != "/usr/local/bin/efekta" {
+		t.Fatalf("expected LookPath fallback, got %q", gotFallback)
+	}
+}
+
+func TestWaitForBrowserConnected(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		if calls < 2 {
+			_, _ = w.Write([]byte(`{"status":"running","browserConnected":false}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"running","browserConnected":true}`))
+	}))
+	defer srv.Close()
+
+	if !waitForBrowserConnected(srv.URL, 500*time.Millisecond, 10*time.Millisecond) {
+		t.Fatal("expected waitForBrowserConnected to succeed on second poll")
+	}
+	if calls < 2 {
+		t.Fatalf("expected at least 2 polls, got %d", calls)
 	}
 }

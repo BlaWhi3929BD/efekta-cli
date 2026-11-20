@@ -108,6 +108,8 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 		rest := UnwrapMatchingQuotes(rawRest)
 
 		switch act {
+		case "status", "state":
+			subs = append(subs, BatchSubCommand{Action: "status", StopOnError: true})
 		case "click":
 			if rest != "" {
 				subs = append(subs, BatchSubCommand{Action: "click", Target: rest, StopOnError: true})
@@ -214,17 +216,27 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 				subs = append(subs, BatchSubCommand{Action: "wait", Target: rest, StopOnError: true})
 			}
 		case "solve":
-			strat := "choice"
+			strat := "auto"
 			if len(tokens) >= 2 {
 				strat = strings.ToLower(tokens[1])
 			}
 			switch strat {
 			case "choice", "multiple_choice":
 				subs = append(subs, BatchSubCommand{Action: "solve_choice", StopOnError: true})
-			case "sentence", "order":
+			case "gaps", "fill", "selection_gaps", "fill_in_the_blanks":
+				subs = append(subs, BatchSubCommand{Action: "solve_gaps", StopOnError: true})
+			case "sort", "categorize", "categorize_columns":
+				subs = append(subs, BatchSubCommand{Action: "solve_sort", StopOnError: true})
+			case "pair", "match", "matching_pairs":
+				subs = append(subs, BatchSubCommand{Action: "solve_pair", StopOnError: true})
+			case "order", "order_dialogue", "sequencing":
+				subs = append(subs, BatchSubCommand{Action: "solve_order", StopOnError: true})
+			case "sentence":
 				subs = append(subs, BatchSubCommand{Action: "solve_sentence", StopOnError: true})
 			case "speak", "voice", "dialog", "skip":
 				subs = append(subs, BatchSubCommand{Action: "skip_speaking", StopOnError: true})
+			case "auto", "all":
+				subs = append(subs, BatchSubCommand{Action: "solve_auto", StopOnError: true})
 			default:
 				subs = append(subs, BatchSubCommand{Action: "solve_" + strat, StopOnError: true})
 			}

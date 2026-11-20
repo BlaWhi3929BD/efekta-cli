@@ -81,3 +81,19 @@ func TestParseBatchScrollWaitAndSolveEdgeCases(t *testing.T) {
 		t.Errorf("unknown solve strategy must not silently fall back to solve_choice: %+v", subs[3])
 	}
 }
+
+func TestParseBatchStatusAndState(t *testing.T) {
+	subs := ParseBatchString(`click act-2; status; state; solve gaps; solve sort; solve pair; solve order; solve auto`)
+	if len(subs) != 8 {
+		t.Fatalf("expected 8 subcommands, got %d: %+v", len(subs), subs)
+	}
+	if subs[1].Action != "status" || !subs[1].StopOnError {
+		t.Errorf("expected status subcommand, got %+v", subs[1])
+	}
+	if subs[2].Action != "status" || !subs[2].StopOnError {
+		t.Errorf("expected state -> status subcommand, got %+v", subs[2])
+	}
+	if subs[3].Action != "solve_gaps" || subs[4].Action != "solve_sort" || subs[5].Action != "solve_pair" || subs[6].Action != "solve_order" || subs[7].Action != "solve_auto" {
+		t.Errorf("unexpected solve subcommands: %+v", subs[3:])
+	}
+}

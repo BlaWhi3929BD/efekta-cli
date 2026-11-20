@@ -386,14 +386,14 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_solve",
-			"description": "Run built-in smart solver for Efekta exercises: 'choice' (solves multiple choice options on regular lessons; automatically blocked on Progress Tests to protect exam score), 'sentence' (analyzes word ordering), or 'speak' (skips pronunciation drills).",
+			"description": "Run built-in smart solver for Efekta exercises (blocked on Progress Tests to protect exam score): 'auto' (solves current exercise automatically), 'choice' (multiple choice), 'gaps' (selection gaps & blanks), 'sort' (category columns), 'pair' (matching pairs), 'order' (dialogue/item ordering), 'sentence' (word ordering), or 'speak' (pronunciation drills).",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
 					"strategy": map[string]interface{}{
 						"type":        "string",
-						"enum":        []string{"choice", "sentence", "speak"},
-						"description": "Solver strategy to execute: choice | sentence | speak",
+						"enum":        []string{"auto", "choice", "gaps", "sort", "pair", "order", "sentence", "speak"},
+						"description": "Solver strategy to execute: auto | choice | gaps | sort | pair | order | sentence | speak",
 					},
 				},
 				"required": []string{"strategy"},
@@ -509,12 +509,22 @@ func executeTool(params toolCallParams, execFn CommandExecutor) (string, bool) {
 		switch strat {
 		case "choice", "multiple_choice":
 			cmd = protocol.Command{Action: "solve_choice"}
-		case "sentence", "order":
+		case "gaps", "fill", "selection_gaps", "fill_in_the_blanks":
+			cmd = protocol.Command{Action: "solve_gaps"}
+		case "sort", "categorize", "categorize_columns":
+			cmd = protocol.Command{Action: "solve_sort"}
+		case "pair", "match", "matching_pairs":
+			cmd = protocol.Command{Action: "solve_pair"}
+		case "order", "order_dialogue", "sequencing":
+			cmd = protocol.Command{Action: "solve_order"}
+		case "sentence":
 			cmd = protocol.Command{Action: "solve_sentence"}
 		case "speak", "voice", "dialog", "skip":
 			cmd = protocol.Command{Action: "skip_speaking"}
+		case "auto", "all":
+			cmd = protocol.Command{Action: "solve_auto"}
 		default:
-			return fmt.Sprintf("Error: unknown solve strategy %q (valid: choice | sentence | speak)", strat), true
+			return fmt.Sprintf("Error: unknown solve strategy %q (valid: auto | choice | gaps | sort | pair | order | sentence | speak)", strat), true
 		}
 	case "efekta_screenshot":
 		outPath := strings.TrimSpace(strArg("outputPath"))
