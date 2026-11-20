@@ -180,6 +180,68 @@ func TestSplitTextChunks(t *testing.T) {
 	if len(chunks) != 2 {
 		t.Fatalf("expected 2 chunks, got %d: %v", len(chunks), chunks)
 	}
+
+	// Oversized single word must be split cleanly without exceeding maxLen
+	longWord := strings.Repeat("a", 55)
+	longChunks := splitTextChunks(longWord, 20)
+	if len(longChunks) != 3 || len(longChunks[0]) != 20 || len(longChunks[1]) != 20 || len(longChunks[2]) != 15 {
+		t.Fatalf("unexpected oversized word chunks: %v", longChunks)
+	}
+
+	// Non-positive maxLen falls back safely to default 180
+	fallback := splitTextChunks("hello world", 0)
+	if len(fallback) != 1 || fallback[0] != "hello world" {
+		t.Fatalf("unexpected fallback chunks: %v", fallback)
+	}
+}
+
+func TestValidateTTSLangAndLengthGuard(t *testing.T) {
+	for _, valid := range []string{"", "en", "en-US", "en-GB", "pt-BR", "zh-CN"} {
+		if _, err := validateTTSLang(valid); err != nil {
+			t.Errorf("expected valid lang %q, got error: %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"--output=/tmp/x", "-f", "en;rm -rf /", "english_long", "../etc"} {
+		if _, err := validateTTSLang(invalid); err == nil {
+			t.Errorf("expected invalid lang %q to be rejected", invalid)
+		}
+	}
+	if _, err := SynthesizeTTS(strings.Repeat("a", maxTTSRunes+1), "en"); err == nil {
+		t.Error("expected oversized TTS text to be rejected")
+	}
+	if _, err := SynthesizeTTS("hello", "--output=/tmp/evil"); err == nil {
+		t.Error("expected flag-like lang to be rejected")
+	}
+}
+
+func TestIsAllowedAudioResponse(t *testing.T) {
+	allowed := [][2]string{
+		{"https://cdn.efekta.com/clip", "audio/mpeg"},
+		{"https://cdn.efekta.com/clip", "audio/ogg; charset=binary"},
+		{"https://cdn.efekta.com/clip", "application/ogg"},
+		{"https://cdn.efekta.com/clip.mp3", "application/octet-stream"},
+		{"https://cdn.efekta.com/clip.wav?token=1", ""},
+		{"https://cdn.efekta.com/video", "video/mp4"},
+	}
+	for _, tc := range allowed {
+		if !isAllowedAudioResponse(tc[0], tc[1]) {
+			t.Errorf("expected (%q, %q) to be allowed", tc[0], tc[1])
+		}
+	}
+
+	blocked := [][2]string{
+		{"https://cdn.efekta.com/api/me", "application/json"},
+		{"https://cdn.efekta.com/index.html", "text/html; charset=utf-8"},
+		{"https://cdn.efekta.com/script.js", "application/javascript"},
+		{"https://cdn.efekta.com/secret.txt", "text/plain"},
+		{"https://cdn.efekta.com/api/secret", "application/octet-stream"},
+		{"https://cdn.efekta.com/api/secret", ""},
+	}
+	for _, tc := range blocked {
+		if isAllowedAudioResponse(tc[0], tc[1]) {
+			t.Errorf("expected (%q, %q) to be blocked", tc[0], tc[1])
+		}
+	}
 }
 
 func TestCommandTimeoutLongMacros(t *testing.T) {
@@ -251,8 +313,23 @@ func TestValidateRemoteAudioURLBlocksSSRF(t *testing.T) {
 		"https://192.168.1.1/router.mp3",
 		"https://100.64.0.1/cgnat.mp3",
 		"https://0.0.0.0/zero.mp3",
+		"https://192.0.0.1/ietf.mp3",
+		"https://192.0.2.1/testnet1.mp3",
+		"https://198.18.0.1/bench.mp3",
+		"https://198.51.100.1/testnet2.mp3",
+		"https://203.0.113.1/testnet3.mp3",
+		"https://240.0.0.1/reserved.mp3",
+		"https://255.255.255.255/broadcast.mp3",
 		"https://[::1]/loopback.mp3",
+		"https://[::127.0.0.1]/ipv4compat.mp3",
 		"https://[::ffff:127.0.0.1]/mapped.mp3",
+		"https://[64:ff9b::127.0.0.1]/nat64.mp3",
+		"https://[64:ff9b:1::1]/nat64local.mp3",
+		"https://[100::1]/discard.mp3",
+		"https://[2001::1]/teredo.mp3",
+		"https://[2001:db8::1]/doc.mp3",
+		"https://[2002:7f00:1::1]/6to4.mp3",
+		"https://[fec0::1]/sitelocal.mp3",
 		"https://[fe80::1]/linklocal.mp3",
 		"https://localhost:8765/api/health",
 		"https://internal.service.local/audio.mp3",
@@ -266,6 +343,9 @@ func TestValidateRemoteAudioURLBlocksSSRF(t *testing.T) {
 
 	if !isPublicIP(net.ParseIP("8.8.8.8")) {
 		t.Error("expected public IP 8.8.8.8 to pass isPublicIP")
+	}
+	if !isPublicIP(net.ParseIP("2606:4700:4700::1111")) {
+		t.Error("expected public IPv6 2606:4700:4700::1111 to pass isPublicIP")
 	}
 	if _, err := validateRemoteAudioURL(context.Background(), "https://8.8.8.8/audio.mp3"); err != nil {
 		t.Errorf("expected public HTTPS IP URL to pass validation, got: %v", err)
