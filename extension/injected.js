@@ -477,6 +477,24 @@
       realHold: null
     };
     ownStreams.add(out.stream);
+    try {
+      if (out.stream && typeof out.stream.getTracks === "function") {
+        for (const tr of out.stream.getTracks()) {
+          if (tr && typeof tr.stop === "function" && !tr.__efkWrappedStop) {
+            const origStop = tr.stop.bind(tr);
+            tr.__efkWrappedStop = true;
+            tr.stop = function () {
+              if (!s.closed && !s.stoppedByPage) {
+                s.stoppedByPage = true;
+                s.stoppedAt = Date.now();
+                note("track-stop", { id: s.id });
+              }
+              return origStop();
+            };
+          }
+        }
+      }
+    } catch (_) {}
     session = s;
     note("inj-consumed", {
       id: s.id,
@@ -523,7 +541,6 @@
     for (const o of s.outputs) {
       try {
         if (o.ctx.state === "suspended") o.ctx.resume().catch(() => {});
-        pending++;
         const src = o.ctx.createBufferSource();
         ownNodes.add(src);
         src.buffer = s.buffer;
@@ -533,6 +550,7 @@
         gain.connect(o.dest);
         src.onended = onDone;
         src.start(o.ctx.currentTime + leadMs / 1000);
+        pending++;
       } catch (e) {
         note("inj-play-error", { id: s.id, error: String(e) });
       }
@@ -568,6 +586,13 @@
     }
     for (const o of s.outputs) {
       allCreatedCtxs.delete(o.ctx);
+      try {
+        if (o.stream && typeof o.stream.getTracks === "function") {
+          o.stream.getTracks().forEach((t) => {
+            try { t.stop(); } catch (_) {}
+          });
+        }
+      } catch (_) {}
       try {
         if (o.ctx.state !== "closed") o.ctx.close();
       } catch (_) {}
@@ -624,6 +649,10 @@
       MRP.stop = function () {
         try {
           note("mr-stop", {});
+          if (session && !session.closed && this.stream === session.stream) {
+            session.stoppedByPage = true;
+            session.stoppedAt = Date.now();
+          }
         } catch (_) {}
         return origMRStop.apply(this, arguments);
       };
@@ -640,7 +669,7 @@
               isArmed()
             ) {
               swapped = consume("MediaRecorder");
-              st = swapped.stream;
+              if (swapped && swapped.stream) st = swapped.stream;
             }
           } catch (_) {}
           super(st, options);
@@ -675,6 +704,7 @@
               note("cmss-inject-direct", { id: s.id, rate: this.sampleRate });
               // Create BufferSource directly inside Efekta's own AudioContext
               const pageSrc = this.createBufferSource();
+              ownNodes.add(pageSrc);
               pageSrc.buffer = s.buffer;
               const origConnect = realNode.connect.bind(realNode);
               realNode.connect = function (dest, ...rest) {
@@ -717,7 +747,7 @@
       via: s.via,
       source: s.source,
       trigger: s.trigger,
-      ctxState: s.outputs[0].ctx.state,
+      ctxState: s.outputs && s.outputs[0] && s.outputs[0].ctx ? s.outputs[0].ctx.state : "closed",
       createdAt: s.createdAt,
       playStartedAt: s.playStartedAt,
       playEndsAt: s.playEndsAt,
@@ -726,7 +756,7 @@
       stoppedAt: s.stoppedAt,
       closed: s.closed,
       recorderState,
-      durationMs: Math.round(s.buffer.duration * 1000)
+      durationMs: s.buffer ? Math.round(s.buffer.duration * 1000) : 0
     };
   }
 
@@ -755,6 +785,10 @@
       case "arm": {
         if (!prepared) return { ok: false, error: "No clip prepared" };
         if (!OrigAudioContext) return { ok: false, error: "Web Audio API not available" };
+        if (session) {
+          cleanupSession(session, true);
+          session = null;
+        }
         const armId = ++seq;
         armed = {
           id: armId,
@@ -765,7 +799,6 @@
           tailMs: Math.max(0, Number(msg.tailMs) || 1200),
           expiresAt: Date.now() + Math.max(1000, Number(msg.timeoutMs) || 15000)
         };
-        session = null;
         note("armed", { id: armId, source: armed.source });
         return { ok: true, id: armId };
       }
@@ -790,8 +823,8 @@
         const srcId = String(msg.srcId || "");
         const dstId = String(msg.dstId || "");
         const items = Array.from(document.querySelectorAll("ef-sequencing-sort-column-item"));
-        const s = (srcId && items.find((el) => el.getAttribute("data-efekta-id") === srcId)) || items[0];
-        const d = (dstId && items.find((el) => el.getAttribute("data-efekta-id") === dstId)) || items[1];
+        const s = srcId ? items.find((el) => el.getAttribute("data-efekta-id") === srcId) : items[0];
+        const d = dstId ? items.find((el) => el.getAttribute("data-efekta-id") === dstId) : items[1];
         if (!s || !d) return { ok: true, result: false };
         const sIdx = items.indexOf(s);
         const dIdx = items.indexOf(d);
