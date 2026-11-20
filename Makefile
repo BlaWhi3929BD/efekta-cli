@@ -12,6 +12,7 @@ build:
 	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/efekta
 
 test:
+	@node -e 'JSON.parse(require("fs").readFileSync("extension/manifest.json","utf8"))'
 	@for f in extension/*.js extension/tests/*.js; do node -c "$$f" || exit 1; done
 	node --test extension/tests/extension.test.js
 	go vet ./...
@@ -19,6 +20,7 @@ test:
 
 install: build
 	@mkdir -p $(TARGET_DIR)
+	@if [ -x "$(TARGET_DIR)/$(BINARY_NAME)" ]; then "$(TARGET_DIR)/$(BINARY_NAME)" daemon stop >/dev/null 2>&1 || true; fi
 	@rm -f $(TARGET_DIR)/$(BINARY_NAME)
 	cp -f $(BUILD_DIR)/$(BINARY_NAME) $(TARGET_DIR)/$(BINARY_NAME)
 	@chmod +x $(TARGET_DIR)/$(BINARY_NAME)

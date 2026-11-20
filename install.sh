@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Efekta CLI & MCP Server Installer (Linux & macOS)
 # One-command installer for beginners: bash install.sh
-set -e
+set -euo pipefail
 
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -68,7 +68,19 @@ if ! command -v go >/dev/null 2>&1; then
   exit 1
 fi
 
-echo -e "✓ Found Go compiler: ${GREEN}$(go version)${NC}"
+GO_VER_STR="$(go version)"
+echo -e "✓ Found Go compiler: ${GREEN}${GO_VER_STR}${NC}"
+
+# Verify minimum Go version (1.23+)
+GO_MAJOR_MINOR="$(echo "$GO_VER_STR" | sed -nE 's/.*go([0-9]+\.[0-9]+).*/\1/p')"
+if [ -n "$GO_MAJOR_MINOR" ]; then
+  GO_MAJOR="${GO_MAJOR_MINOR%%.*}"
+  GO_MINOR="${GO_MAJOR_MINOR#*.}"
+  if [ "$GO_MAJOR" -lt 1 ] || { [ "$GO_MAJOR" -eq 1 ] && [ "$GO_MINOR" -lt 23 ]; }; then
+    echo -e "${RED}Go 1.23+ is required (found go${GO_MAJOR_MINOR}). Please upgrade Go from https://go.dev/dl/${NC}"
+    exit 1
+  fi
+fi
 
 # 3. Build static binary
 echo -e "\nBuilding static ${BIN_NAME} binary..."
@@ -81,35 +93,56 @@ echo -e "✓ Built ${GREEN}$SCRIPT_DIR/bin/$BIN_NAME${NC}"
 
 # 4. Install into ~/.local/bin
 mkdir -p "$TARGET_DIR"
+if [ -x "$TARGET_DIR/$BIN_NAME" ]; then
+  echo -e "Stopping any running ${BIN_NAME} daemon before updating..."
+  "$TARGET_DIR/$BIN_NAME" daemon stop >/dev/null 2>&1 || true
+fi
 rm -f "$TARGET_DIR/$BIN_NAME"
 cp -f "$SCRIPT_DIR/bin/$BIN_NAME" "$TARGET_DIR/$BIN_NAME"
 chmod +x "$TARGET_DIR/$BIN_NAME"
 echo -e "✓ Installed executable to ${GREEN}$TARGET_DIR/$BIN_NAME${NC}"
 
 # 5. Check PATH and suggest/add export if missing
-CURRENT_PATH=":$PATH:"
+CURRENT_PATH=":${PATH:-}:"
 if [[ "$CURRENT_PATH" != *":$TARGET_DIR:"* ]]; then
   echo -e "\n${YELLOW}Notice:${NC} $TARGET_DIR is not currently in your system PATH."
 
-  SHELL_RC=""
-  if [ -n "$ZSH_VERSION" ] || [ -f "$HOME/.zshrc" ]; then
-    SHELL_RC="$HOME/.zshrc"
-  elif [ -f "$HOME/.bashrc" ]; then
-    SHELL_RC="$HOME/.bashrc"
-  elif [ -f "$HOME/.profile" ]; then
-    SHELL_RC="$HOME/.profile"
-  fi
-
-  if [ -n "$SHELL_RC" ]; then
-    PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
-    if ! grep -qs 'HOME/.local/bin' "$SHELL_RC"; then
-      echo "$PATH_LINE" >> "$SHELL_RC"
-      echo -e "✓ Automatically added $TARGET_DIR to ${GREEN}$SHELL_RC${NC}"
-      echo -e "  Run: ${GREEN}source $SHELL_RC${NC} (or open a new terminal) to refresh PATH."
+  USER_SHELL="$(basename "${SHELL:-}")"
+  if [ "$USER_SHELL" = "fish" ]; then
+    FISH_CFG="$HOME/.config/fish/config.fish"
+    mkdir -p "$(dirname "$FISH_CFG")"
+    if ! grep -qs '\.local/bin' "$FISH_CFG" 2>/dev/null; then
+      echo 'fish_add_path "$HOME/.local/bin"' >> "$FISH_CFG"
+      echo -e "✓ Automatically added $TARGET_DIR to ${GREEN}$FISH_CFG${NC}"
+      echo -e "  Open a new terminal (or run ${GREEN}source $FISH_CFG${NC}) to refresh PATH."
     fi
   else
-    echo -e "Add this line to your ~/.bashrc or ~/.zshrc:"
-    echo -e "  ${GREEN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    SHELL_RC=""
+    case "$USER_SHELL" in
+      zsh) SHELL_RC="$HOME/.zshrc" ;;
+      bash) SHELL_RC="$HOME/.bashrc" ;;
+      *)
+        if [ -f "$HOME/.zshrc" ]; then
+          SHELL_RC="$HOME/.zshrc"
+        elif [ -f "$HOME/.bashrc" ]; then
+          SHELL_RC="$HOME/.bashrc"
+        elif [ -f "$HOME/.profile" ]; then
+          SHELL_RC="$HOME/.profile"
+        fi
+        ;;
+    esac
+
+    if [ -n "$SHELL_RC" ]; then
+      PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+      if ! grep -qs 'HOME/.local/bin' "$SHELL_RC" 2>/dev/null; then
+        echo "$PATH_LINE" >> "$SHELL_RC"
+        echo -e "✓ Automatically added $TARGET_DIR to ${GREEN}$SHELL_RC${NC}"
+        echo -e "  Run: ${GREEN}source $SHELL_RC${NC} (or open a new terminal) to refresh PATH."
+      fi
+    else
+      echo -e "Add this line to your shell profile:"
+      echo -e "  ${GREEN}export PATH=\"\$HOME/.local/bin:\$PATH\"${NC}"
+    fi
   fi
 fi
 

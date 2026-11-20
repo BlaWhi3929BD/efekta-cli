@@ -26,9 +26,10 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Check extension JS syntax
+      - name: Check extension manifest and JS syntax
         shell: bash
         run: |
+          node -e 'JSON.parse(require("fs").readFileSync("extension/manifest.json","utf8"))'
           for f in extension/*.js extension/tests/*.js; do
             node -c "$f" || exit 1
           done

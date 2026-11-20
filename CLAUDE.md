@@ -1,29 +1,36 @@
 # CLAUDE.md — Efekta Turbo Playbook for Claude Code
 
-Use `efekta` v2.2 (Turbo Engine) to complete English lessons on `learn.better.efekta.com` in **1 command per interactive screen**.
+Use `efekta` v3.0 (Turbo Autonomous Engine) to complete English lessons on `learn.better.efekta.com` in **1 command per interactive screen**.
 
-## 4 Golden Rules
-1. **NEVER call `wait` or `status` manually after an action:** Every `batch`, `next`, `pick`, `pair`, `sort`, and `gaps` command auto-waits for UI locks and returns the updated state (`data.agentHint`).
-2. **ALWAYS end exercise batches with `; next`:** Fast-forwards through all consecutive reading cards, `"Correct answers"` review screens, `"Step passed!"` summaries, and Lesson Overviews in a single roundtrip!
+## 5 Golden Rules
+1. **Let the program do the work first (`efekta auto`):** `efekta auto --json -c` autonomously handles passive cards, skips pronunciation drills, solves regular multiple-choice questions, writes essays, and conducts avatar dialogues. It stops when a knowledge task (`gaps`, `sort`, `pair`, `order_dialogue`) or a Progress Test needs your answer.
+2. **ALWAYS end exercise batches with `; next` (or `; auto`):** Fast-forwards through all consecutive reading cards, `"Correct answers"` review screens, self-evaluations, `"Step passed!"` summaries, and Lesson Overviews in a single roundtrip.
 3. **ALWAYS pass `--json -c` (Compact Mode):** Strips the verbose `elements` coordinate array (saving 80% tokens) and highlights `data.agentHint` (`exerciseType`, `actionTemplate`, `slots`, `items`, `options`, `inputs`).
-4. **Skip optional speaking tasks:** When `skip-1` is present, run `efekta batch "click skip-1; next" --json -c`.
+4. **Skip multi-phrase pronunciation drills in 1 command:** Run `efekta skip --json -c` to skip all phrases in a pronunciation drill and advance.
+5. **PROGRESS TEST MANDATE ("Take the final test") — ZERO TRIAL-AND-ERROR:**
+   - **NEVER use `solve choice` or brute-force on formal Progress Tests.** Every exam question is single-shot and counts toward the 70% certificate threshold.
+   - The engine automatically detects Progress Tests (`exerciseType: "progress_test_choice"`) and blocks `solve choice` and `auto`. Always analyze the question grammatically and submit safely with `efekta batch "pick opt-X; next" --json -c`.
 
 ## 1-Look Decision Table
 
 | `agentHint.exerciseType` | Command to Run Immediately |
 | :--- | :--- |
-| `passive_screen` / `lesson_overview` | `efekta next --json -c` |
-| `multiple_choice` (1 answer) | `efekta batch "pick opt-2; next" --json -c` |
-| `multiple_choice` (multi-select) | `efekta batch "pick opt-1,opt-3,opt-5; next" --json -c` |
+| `course_overview` / dashboard | `efekta lesson next --json -c` |
+| `passive_screen` / `lesson_overview` | `efekta next --json -c` *(or `efekta auto --json -c`)* |
+| `multiple_choice` (regular lesson) | `efekta batch "solve choice; next" --json -c` *(or `pick opt-X; next`)* |
+| **`progress_test_choice` (Final Test)** | `efekta batch "pick opt-X; next" --json -c` *(Analyze carefully first!)* |
 | `matching_pairs` | `efekta batch "pair slot-1:item-3, slot-2:item-1, slot-3:item-2; next" --json -c` |
 | `categorize_columns` | `efekta batch "sort slot-1:item-1,item-4; sort slot-2:item-2,item-3; next" --json -c` |
 | `selection_gaps` / `fill_in_the_blanks` | `efekta batch "gaps word1, word2, word3, word4; next" --json -c` |
-| `order_sentence` | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
-| `speaking_avatar` (with `skip-1`) | `efekta batch "click skip-1; next" --json -c` |
-| `speaking_avatar` (final stage) | `efekta batch "wait video-end; solve speak" --json -c` -> then `efekta batch "pick opt-1; next" --json -c` |
+| `writing_essay` | `efekta batch "essay; next" --json -c` |
+| `order_sentence` (tap sequence) | `efekta batch "sequence auto; next" --json -c` |
+| `order_sentence` (token picker) | `efekta batch "pick item-3,item-1,item-4,item-2; next" --json -c` |
+| `order_dialogue` | `efekta batch "drag item-2 item-1; next" --json -c` |
+| `speaking_practice` | `efekta skip --json -c` |
+| `speaking_avatar` (final stage) | `efekta batch "dialogue; next" --json -c` |
 
 ## Build & Verify
 ```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/efekta ./cmd/efekta
-go test -race ./...
+make test
+make build
 ```

@@ -221,7 +221,7 @@ When interacting with the CLI, always pass `--json -c` for 80% smaller compact o
 
 ## 🔧 Troubleshooting & Windows Notes
 
-- **Port `8765` conflict / daemon startup failure:** The CLI daemon listens on `127.0.0.1:8765` to match the browser extension. On Windows with Hyper-V/WSL2, dynamic port exclusions or another local service can occasionally block `8765`. Check the startup log `efekta-daemon.log` in `%TEMP%` (Windows) or `$TMPDIR` / `/tmp` (macOS/Linux), and stop conflicting processes with `efekta daemon stop`.
+- **Port `8765` conflict / daemon startup failure:** The CLI daemon listens on `127.0.0.1:8765` to match the browser extension. On Windows with Hyper-V/WSL2, dynamic port exclusions or another local service can occasionally block `8765`. Check the startup log in your user cache directory (`~/.cache/efekta/daemon.log` on Linux, `~/Library/Caches/efekta/daemon.log` on macOS, `%LOCALAPPDATA%\efekta\daemon.log` on Windows), and stop conflicting processes with `efekta daemon stop`.
 - **Quoting in Windows `cmd.exe` vs PowerShell:** `cmd.exe` does not strip single quotes `'...'`, so prefer double quotes for commands like `efekta batch "pick opt-1; next"` (matching PowerShell/bash).
 
 ---

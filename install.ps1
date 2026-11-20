@@ -121,7 +121,11 @@ try {
         Write-Host "`nAdding $targetDir to User PATH environment variable..." -ForegroundColor Yellow
         $newUserPath = (@($segments + $unexpandedTarget)) -join ";"
         $envKey.SetValue("Path", $newUserPath, [Microsoft.Win32.RegistryValueKind]::ExpandString)
-        $env:Path = ($env:Path.TrimEnd(";") + ";$targetDir").TrimStart(";")
+        if ($env:Path) {
+            $env:Path = ($env:Path.TrimEnd(";") + ";$targetDir").TrimStart(";")
+        } else {
+            $env:Path = $targetDir
+        }
         $pathUpdated = $true
         Write-Host "✓ PATH updated successfully." -ForegroundColor Green
     }
