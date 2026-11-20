@@ -33,12 +33,23 @@ function renderStatus(res) {
 
 function refresh() {
   chrome.runtime.sendMessage({ type: "POPUP_GET_STATUS" }, (res) => {
+    if (chrome.runtime.lastError) {
+      renderStatus(null);
+      return;
+    }
     renderStatus(res);
   });
 }
 
-document.getElementById("reconnect-btn").addEventListener("click", () => {
+const reconnectBtn = document.getElementById("reconnect-btn");
+reconnectBtn.addEventListener("click", () => {
+  reconnectBtn.disabled = true;
   chrome.runtime.sendMessage({ type: "POPUP_RECONNECT" }, (res) => {
+    reconnectBtn.disabled = false;
+    if (chrome.runtime.lastError) {
+      renderStatus(null);
+      return;
+    }
     renderStatus(res);
   });
 });

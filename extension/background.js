@@ -26,9 +26,12 @@ function isTransportError(errMsg) {
   );
 }
 
+const MAX_AUDIO_BYTES = 8 * 1024 * 1024;
+const AUDIO_EXT_RE = /\.(mp3|m4a|aac|wav|ogg|oga|opus|weba|flac)$/i;
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
+  const chunkSize = 0x4000;
   const chunks = [];
   for (let i = 0; i < bytes.length; i += chunkSize) {
     chunks.push(String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize)));
@@ -36,15 +39,142 @@ function arrayBufferToBase64(buffer) {
   return btoa(chunks.join(""));
 }
 
+function isLearnEfektaUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const u = new URL(rawUrl);
+    return u.protocol === "https:" && u.hostname.toLowerCase() === "learn.better.efekta.com";
+  } catch (_) {
+    return false;
+  }
+}
+
+function isEfektaUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    return h === "efekta.com" || h.endsWith(".efekta.com");
+  } catch (_) {
+    return false;
+  }
+}
+
+function isPrivateOrBlockedHost(host) {
+  const h = String(host || "").trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
+  if (
+    !h ||
+    h === "localhost" ||
+    h.endsWith(".localhost") ||
+    h.endsWith(".local") ||
+    h.endsWith(".internal") ||
+    h.endsWith(".home.arpa")
+  ) {
+    return true;
+  }
+  // IPv4 literal check
+  const ipv4Match = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4Match) {
+    const [a, b, c, d] = ipv4Match.slice(1).map(Number);
+    if ([a, b, c, d].some((n) => n > 255)) return true;
+    if (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+      (a === 198 && (b === 18 || b === 19)) ||
+      (a === 198 && b === 51 && c === 100) ||
+      (a === 203 && b === 0 && c === 113)
+    ) {
+      return true;
+    }
+    return false;
+  }
+  // Reject raw IPv6 literals for local/private/special ranges (or all non-global prefixes)
+  if (h.includes(":")) {
+    if (
+      h === "::" ||
+      h === "::1" ||
+      h.startsWith("::") ||
+      h.startsWith("0:") ||
+      h.startsWith("64:ff9b:") ||
+      h.startsWith("100::") ||
+      h.startsWith("2001:db8:") ||
+      h.startsWith("2002:") ||
+      h.startsWith("fc") ||
+      h.startsWith("fd") ||
+      h.startsWith("fe8") ||
+      h.startsWith("fe9") ||
+      h.startsWith("fea") ||
+      h.startsWith("feb") ||
+      h.startsWith("fec") ||
+      h.startsWith("fed") ||
+      h.startsWith("fee") ||
+      h.startsWith("fef") ||
+      h.startsWith("ff")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function isAllowedAudioFetchUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || "").trim());
+    if (u.protocol !== "https:" || u.username || u.password) return false;
+    return !isPrivateOrBlockedHost(u.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+function isAllowedAudioMime(rawUrl, contentType) {
+  const mime = String(contentType || "").split(";")[0].trim().toLowerCase();
+  if (
+    mime.startsWith("audio/") ||
+    mime === "application/ogg" ||
+    mime === "video/mp4" ||
+    mime === "video/webm"
+  ) {
+    return true;
+  }
+  if (!mime || mime === "application/octet-stream" || mime === "binary/octet-stream") {
+    try {
+      const u = new URL(String(rawUrl || ""));
+      return AUDIO_EXT_RE.test(u.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+  return false;
+}
+
+function safeWsSend(socket, payload) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+  try {
+    socket.send(JSON.stringify(payload));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 // Find tab where Efekta is open (prefers active tab in current window if multiple exist)
 async function findEfektaTab() {
   try {
     const tabs = await chrome.tabs.query({});
-    const exactTabs = tabs.filter((t) => t.url && t.url.includes("learn.better.efekta.com"));
+    const exactTabs = tabs.filter((t) => isLearnEfektaUrl(t.url));
     if (exactTabs.length > 0) {
       return exactTabs.find((t) => t.active) || exactTabs[0];
     }
-    const anyEfekta = tabs.filter((t) => t.url && t.url.includes("efekta.com"));
+    const anyEfekta = tabs.filter((t) => isEfektaUrl(t.url));
     return anyEfekta.find((t) => t.active) || anyEfekta[0] || null;
   } catch (_) {
     return null;
@@ -53,19 +183,16 @@ async function findEfektaTab() {
 
 // Send status update (hello / ping) to Go daemon so it knows which browser has Efekta open
 async function sendStatusUpdate(type = "ping") {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const tab = await findEfektaTab();
-  try {
-    ws.send(
-      JSON.stringify({
-        type,
-        client: "efekta-extension-v3",
-        hasEfektaTab: !!tab,
-        tabUrl: tab ? tab.url : "",
-        userAgent: navigator.userAgent
-      })
-    );
-  } catch (_) {}
+  safeWsSend(socket, {
+    type,
+    client: "efekta-extension-v3",
+    hasEfektaTab: !!tab,
+    tabUrl: tab ? tab.url : "",
+    userAgent: navigator.userAgent
+  });
 }
 
 // Ensure content scripts are injected into all frames even if tab was opened BEFORE extension reload
@@ -234,8 +361,10 @@ async function ensureSelfStudyFromLessonView(tab) {
 
   const exitedViaBtn = await waitForTabExitLessonView(tab.id, 2500);
   if (!exitedViaBtn) {
-    await chrome.tabs.update(tab.id, { url: SELF_STUDY_URL });
-    await waitForTabExitLessonView(tab.id, 8000);
+    try {
+      await chrome.tabs.update(tab.id, { url: SELF_STUDY_URL });
+      await waitForTabExitLessonView(tab.id, 8000);
+    } catch (_) {}
   }
   tabActiveFrames.delete(tab.id);
   await ensureContentScriptInjected(tab.id);
@@ -267,6 +396,7 @@ async function sendMessageToTabWithRetry(tabId, req) {
     let lastAppFailure = null;
     let lastTransportError = "No frames available";
     let bestEmptyStatus = null;
+    let retryAfterInject = false;
 
     for (const fId of candidateFrames) {
       const res = await sendMsg(tabId, req, { frameId: fId });
@@ -292,6 +422,7 @@ async function sendMessageToTabWithRetry(tabId, req) {
           if (!bestEmptyStatus) bestEmptyStatus = res;
           await ensureContentScriptInjected(tabId);
           await new Promise((r) => setTimeout(r, 280));
+          retryAfterInject = true;
           break;
         }
 
@@ -326,6 +457,10 @@ async function sendMessageToTabWithRetry(tabId, req) {
       }
     }
 
+    if (retryAfterInject && pass === 0) {
+      continue;
+    }
+
     if (bestEmptyStatus) {
       return bestEmptyStatus;
     }
@@ -352,9 +487,11 @@ function connectDaemon() {
   }
 
   try {
-    ws = new WebSocket(DAEMON_WS_URL);
+    const socket = new WebSocket(DAEMON_WS_URL);
+    ws = socket;
 
-    ws.onopen = async () => {
+    socket.onopen = async () => {
+      if (ws !== socket) return;
       log("Connected to Go daemon at", DAEMON_WS_URL);
       if (reconnectTimer) {
         clearTimeout(reconnectTimer);
@@ -373,7 +510,8 @@ function connectDaemon() {
       }, 15000);
     };
 
-    ws.onmessage = async (event) => {
+    socket.onmessage = async (event) => {
+      if (ws !== socket) return;
       let req;
       try {
         req = JSON.parse(event.data);
@@ -392,14 +530,12 @@ function connectDaemon() {
       try {
         const tab = await findEfektaTab();
         if (!tab) {
-          ws.send(
-            JSON.stringify({
-              id: reqId,
-              success: false,
-              error:
-                "No Efekta tab found in browser. Please open https://learn.better.efekta.com"
-            })
-          );
+          safeWsSend(socket, {
+            id: reqId,
+            success: false,
+            error:
+              "No Efekta tab found in browser. Please open https://learn.better.efekta.com"
+          });
           return;
         }
 
@@ -427,7 +563,7 @@ function connectDaemon() {
               error: res && res.error
             });
           }
-          ws.send(JSON.stringify({
+          safeWsSend(socket, {
             id: reqId,
             success: true,
             data: {
@@ -438,18 +574,18 @@ function connectDaemon() {
               navFrames,
               registered
             }
-          }));
+          });
           return;
         }
 
         if (action === "reload_tab") {
           await chrome.tabs.reload(tab.id);
-          ws.send(JSON.stringify({ id: reqId, success: true, message: "Efekta tab reloaded" }));
+          safeWsSend(socket, { id: reqId, success: true, message: "Efekta tab reloaded" });
           return;
         }
 
         if (action === "reload_extension") {
-          ws.send(JSON.stringify({ id: reqId, success: true, message: "Extension reloading..." }));
+          safeWsSend(socket, { id: reqId, success: true, message: "Extension reloading..." });
           setTimeout(() => {
             if (chrome.runtime && chrome.runtime.reload) {
               chrome.runtime.reload();
@@ -465,25 +601,21 @@ function connectDaemon() {
               await new Promise((r) => setTimeout(r, 80));
             }
             const dataUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
-            ws.send(
-              JSON.stringify({
-                id: reqId,
-                success: true,
-                data: {
-                  tabId: tab.id,
-                  url: tab.url,
-                  screenshotBase64: dataUrl.replace(/^data:image\/png;base64,/, "")
-                }
-              })
-            );
+            safeWsSend(socket, {
+              id: reqId,
+              success: true,
+              data: {
+                tabId: tab.id,
+                url: tab.url,
+                screenshotBase64: dataUrl.replace(/^data:image\/png;base64,/, "")
+              }
+            });
           } catch (e) {
-            ws.send(
-              JSON.stringify({
-                id: reqId,
-                success: false,
-                error: "Screenshot capture failed: " + e.message
-              })
-            );
+            safeWsSend(socket, {
+              id: reqId,
+              success: false,
+              error: "Screenshot capture failed: " + e.message
+            });
           }
           return;
         }
@@ -515,24 +647,21 @@ function connectDaemon() {
         } else {
           response = await sendMessageToTabWithRetry(tab.id, req);
         }
-        ws.send(
-          JSON.stringify({
-            id: reqId,
-            ...response
-          })
-        );
+        safeWsSend(socket, {
+          id: reqId,
+          ...response
+        });
       } catch (e) {
-        ws.send(
-          JSON.stringify({
-            id: reqId,
-            success: false,
-            error: "Error processing request: " + e.message
-          })
-        );
+        safeWsSend(socket, {
+          id: reqId,
+          success: false,
+          error: "Error processing request: " + (e && e.message ? e.message : String(e))
+        });
       }
     };
 
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (ws !== socket) return;
       if (heartbeatTimer) {
         clearInterval(heartbeatTimer);
         heartbeatTimer = null;
@@ -540,9 +669,10 @@ function connectDaemon() {
       scheduleReconnect();
     };
 
-    ws.onerror = () => {
+    socket.onerror = () => {
+      if (ws !== socket) return;
       try {
-        ws.close();
+        socket.close();
       } catch (_) {}
     };
   } catch (_) {
@@ -560,7 +690,9 @@ function scheduleReconnect() {
 }
 
 if (chrome.alarms) {
-  chrome.alarms.create("efekta-keepalive", { periodInMinutes: 0.4 });
+  try {
+    chrome.alarms.create("efekta-keepalive", { periodInMinutes: 0.5 });
+  } catch (_) {}
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === "efekta-keepalive") {
       if (!ws || ws.readyState === WebSocket.CLOSED) {
@@ -574,9 +706,16 @@ if (chrome.alarms) {
 
 if (chrome.tabs && chrome.tabs.onUpdated) {
   chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-    if (changeInfo.status === "complete" && tab.url && tab.url.includes("efekta.com")) {
+    if (changeInfo.status === "complete" && tab && isEfektaUrl(tab.url)) {
       sendStatusUpdate("ping");
     }
+  });
+}
+
+if (chrome.tabs && chrome.tabs.onRemoved) {
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    tabFrames.delete(tabId);
+    tabActiveFrames.delete(tabId);
   });
 }
 
@@ -612,6 +751,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return false;
     }
     chrome.tabs.update(sender.tab.id, { url: msg.url }, (tab) => {
+      if (chrome.runtime.lastError) {
+        sendResponse({ ok: false, error: chrome.runtime.lastError.message });
+        return;
+      }
       sendResponse({ ok: true, tabId: tab ? tab.id : null });
     });
     return true;
@@ -619,27 +762,46 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Fetch cross-origin reference audio bytes for Voice Engine
   if (msg && msg.type === "FETCH_AUDIO_B64" && msg.url) {
-    let validHttps = false;
-    try {
-      validHttps = new URL(msg.url).protocol === "https:";
-    } catch (_) {}
-    if (!validHttps) {
-      sendResponse({ ok: false, error: "Blocked non-HTTPS audio URL" });
+    if (!isAllowedAudioFetchUrl(msg.url)) {
+      sendResponse({ ok: false, error: "Blocked unsafe or non-HTTPS audio URL" });
       return false;
     }
     (async () => {
       try {
-        const resp = await fetch(msg.url);
+        const resp = await fetch(msg.url, { credentials: "omit", redirect: "follow" });
         if (!resp.ok) {
           sendResponse({ ok: false, error: `HTTP ${resp.status}` });
           return;
         }
+        const finalUrl = resp.url || msg.url;
+        if (!isAllowedAudioFetchUrl(finalUrl)) {
+          sendResponse({ ok: false, error: "Blocked unsafe audio redirect target" });
+          return;
+        }
+        const contentType = resp.headers && resp.headers.get ? resp.headers.get("content-type") || "" : "";
+        if (!isAllowedAudioMime(finalUrl, contentType)) {
+          sendResponse({ ok: false, error: `Blocked non-audio content type: ${contentType || "unknown"}` });
+          return;
+        }
+        const contentLength = Number(resp.headers && resp.headers.get ? resp.headers.get("content-length") : 0);
+        if (contentLength > MAX_AUDIO_BYTES) {
+          sendResponse({ ok: false, error: "Audio clip exceeds 8MB size limit" });
+          return;
+        }
         const buf = await resp.arrayBuffer();
+        if (!buf || buf.byteLength === 0) {
+          sendResponse({ ok: false, error: "Empty audio response" });
+          return;
+        }
+        if (buf.byteLength > MAX_AUDIO_BYTES) {
+          sendResponse({ ok: false, error: "Audio clip exceeds 8MB size limit" });
+          return;
+        }
         const b64 = arrayBufferToBase64(buf);
         sendResponse({
           ok: true,
           b64,
-          mime: resp.headers.get("content-type") || "audio/mpeg"
+          mime: contentType || "audio/mpeg"
         });
       } catch (e) {
         // Fallback through local Go daemon proxy
