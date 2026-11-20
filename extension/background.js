@@ -61,6 +61,118 @@ function isEfektaUrl(rawUrl) {
   }
 }
 
+function isStudyPlayerUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== "https:") return false;
+    const h = u.hostname.toLowerCase();
+    return h === "study.better.efekta.com" || h.endsWith(".study.better.efekta.com");
+  } catch (_) {
+    return false;
+  }
+}
+
+function isAuthGatewayUrl(rawUrl) {
+  if (!rawUrl) return false;
+  try {
+    const u = new URL(rawUrl);
+    const h = u.hostname.toLowerCase();
+    const p = u.pathname.toLowerCase();
+    return (
+      h === "catalyst-enter.better.efekta.com" ||
+      h.includes("catalyst-enter") ||
+      h === "challenges.cloudflare.com" ||
+      h.endsWith(".cloudflare.com") ||
+      ((h === "www.google.com" ||
+        h === "google.com" ||
+        h === "www.recaptcha.net" ||
+        h === "recaptcha.net" ||
+        h === "www.gstatic.com") &&
+        p.includes("recaptcha")) ||
+      h === "hcaptcha.com" ||
+      h.endsWith(".hcaptcha.com")
+    );
+  } catch (_) {
+    return false;
+  }
+}
+
+function buildHumanVerificationResponse(authUrl) {
+  const safeUrl = sanitizeUrl(authUrl);
+  const summary =
+    "Human verification (Cloudflare Turnstile / reCAPTCHA) is displayed in the browser. Complete it manually in the browser window.";
+  return {
+    success: true,
+    needsAgent: true,
+    stoppedAt: "human_verification_required",
+    message: summary,
+    data: {
+      url: safeUrl,
+      title: "Human Verification Required",
+      exerciseType: "human_verification_required",
+      isProgressTest: false,
+      prompt: summary,
+      contextText: [],
+      feedback: "",
+      agentHint: {
+        exerciseType: "human_verification_required",
+        actionTemplate: "",
+        summary,
+        slots: [],
+        items: [],
+        options: [],
+        inputs: []
+      },
+      video: {
+        hasVideo: false,
+        hasAudio: false,
+        paused: true,
+        ended: true,
+        currentTime: 0,
+        duration: 0,
+        isPlaying: false
+      },
+      canProceed: false,
+      nextButtonId: "",
+      elementsCount: 0,
+      elements: []
+    }
+  };
+}
+
+async function detectAuthGatewayOnlyFrame(tabId) {
+  if (!chrome.webNavigation || !chrome.webNavigation.getAllFrames) return null;
+  try {
+    const allFrames = await new Promise((resolve) => {
+      chrome.webNavigation.getAllFrames({ tabId }, resolve);
+    });
+    if (!Array.isArray(allFrames) || allFrames.length === 0) return null;
+    if (allFrames.some((f) => f && f.frameId !== 0 && isStudyPlayerUrl(f.url))) {
+      return null;
+    }
+    const authFrame = allFrames.find((f) => f && f.frameId !== 0 && isAuthGatewayUrl(f.url));
+    return authFrame ? authFrame.url : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function sanitizeUrl(rawUrl) {
+  if (!rawUrl) return "";
+  try {
+    const u = new URL(rawUrl);
+    for (const key of Array.from(u.searchParams.keys())) {
+      if (/^(token|access_token|id_token|jwt|code|auth|session|sig|signature)$/i.test(key)) {
+        u.searchParams.set(key, "[REDACTED]");
+      }
+    }
+    return u.toString();
+  } catch (_) {
+    return String(rawUrl).split("?")[0];
+  }
+}
+
 function isPrivateOrBlockedHost(host) {
   const h = String(host || "").trim().toLowerCase().replace(/\.$/, "").replace(/^\[|\]$/g, "");
   if (
@@ -190,30 +302,59 @@ async function sendStatusUpdate(type = "ping") {
     type,
     client: "efekta-extension-v3",
     hasEfektaTab: !!tab,
-    tabUrl: tab ? tab.url : "",
+    tabUrl: tab ? sanitizeUrl(tab.url) : "",
     userAgent: navigator.userAgent
   });
 }
 
-// Ensure content scripts are injected into all frames even if tab was opened BEFORE extension reload
+// Inject content scripts ONLY into Efekta dashboard/player frames — NEVER into catalyst-enter or Turnstile auth frames!
 async function ensureContentScriptInjected(tabId) {
   if (!chrome.scripting || !chrome.scripting.executeScript) return;
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ["content.js"]
-    });
-  } catch (e) {
-    log("executeScript content.js error:", e && e.message);
+  let contentFrameIds = [0];
+  let mainWorldFrameIds = [];
+
+  if (chrome.webNavigation && chrome.webNavigation.getAllFrames) {
+    try {
+      const allFrames = await new Promise((resolve) => {
+        chrome.webNavigation.getAllFrames({ tabId }, resolve);
+      });
+      if (Array.isArray(allFrames) && allFrames.length > 0) {
+        contentFrameIds = [];
+        for (const f of allFrames) {
+          if (!f || typeof f.frameId !== "number" || !f.url || isAuthGatewayUrl(f.url)) {
+            continue;
+          }
+          if (isLearnEfektaUrl(f.url) || isStudyPlayerUrl(f.url)) {
+            contentFrameIds.push(f.frameId);
+          }
+          if (isStudyPlayerUrl(f.url)) {
+            mainWorldFrameIds.push(f.frameId);
+          }
+        }
+      }
+    } catch (_) {}
   }
-  try {
-    await chrome.scripting.executeScript({
-      target: { tabId, allFrames: true },
-      files: ["injected.js"],
-      world: "MAIN"
-    });
-  } catch (e) {
-    log("executeScript injected.js error:", e && e.message);
+
+  if (contentFrameIds.length > 0) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: contentFrameIds },
+        files: ["content.js"]
+      });
+    } catch (e) {
+      log("executeScript content.js error:", e && e.message);
+    }
+  }
+  if (mainWorldFrameIds.length > 0) {
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId, frameIds: mainWorldFrameIds },
+        files: ["injected.js"],
+        world: "MAIN"
+      });
+    } catch (e) {
+      log("executeScript injected.js error:", e && e.message);
+    }
   }
 }
 
@@ -275,42 +416,41 @@ async function getCandidateFrames(tabId) {
           }
         }
 
-        // Priority 1: Active lesson-player iframe if present
+        // Priority 1: Active study/lesson-player iframe matched strictly by hostname (never query params like redirect_uri)
         for (const f of allFrames) {
-          if (f.frameId !== 0 && f.url && f.url.includes("lesson-player")) {
+          if (f.frameId !== 0 && isStudyPlayerUrl(f.url)) {
             pushUnique(f.frameId);
           }
         }
-        // Priority 1b: Registered lesson player frames from FRAME_REGISTER
+        // Priority 1b: Registered lesson player frames from FRAME_REGISTER (excluding auth gateways)
         if (map) {
           for (const [k, info] of map.entries()) {
-            if (k !== 0 && info.isLessonPlayer && (!liveFrameIds || liveFrameIds.has(k))) {
+            if (
+              k !== 0 &&
+              info.isLessonPlayer &&
+              !isAuthGatewayUrl(info.url) &&
+              (!liveFrameIds || liveFrameIds.has(k))
+            ) {
               pushUnique(k);
             }
           }
         }
-        // Priority 2: Last known active frame (if non-zero)
+        // Priority 2: Last known active frame (if non-zero and not an auth gateway)
         if (tabActiveFrames.has(tabId) && tabActiveFrames.get(tabId) !== 0) {
-          pushUnique(tabActiveFrames.get(tabId));
+          const activeId = tabActiveFrames.get(tabId);
+          const activeMeta = allFrames.find((f) => f.frameId === activeId);
+          if (!activeMeta || !isAuthGatewayUrl(activeMeta.url)) {
+            pushUnique(activeId);
+          }
         }
-        // Priority 3: Other study/gap iframes
+        // Priority 3: Other non-auth Efekta child iframes
         for (const f of allFrames) {
-          if (
-            f.frameId !== 0 &&
-            f.url &&
-            (f.url.includes("study") || f.url.includes("gap"))
-          ) {
+          if (f.frameId !== 0 && isEfektaUrl(f.url) && !isAuthGatewayUrl(f.url)) {
             pushUnique(f.frameId);
           }
         }
         // Priority 4: Top-level frame (frameId 0)
         pushUnique(0);
-        // Priority 5: Any remaining non-blank child frames
-        for (const f of allFrames) {
-          if (f.frameId !== 0 && f.url && !f.url.startsWith("about:")) {
-            pushUnique(f.frameId);
-          }
-        }
         return candidates;
       }
     } catch (_) {}
@@ -462,6 +602,12 @@ async function sendMessageToTabWithRetry(tabId, req) {
     }
 
     if (bestEmptyStatus) {
+      if (pass === 1 || !retryAfterInject) {
+        const authUrl = await detectAuthGatewayOnlyFrame(tabId);
+        if (authUrl) {
+          return buildHumanVerificationResponse(authUrl);
+        }
+      }
       return bestEmptyStatus;
     }
 
@@ -471,6 +617,10 @@ async function sendMessageToTabWithRetry(tabId, req) {
 
     // All frames failed with transport error: inject scripts and retry after brief settle delay
     if (pass === 0) {
+      const authUrl = await detectAuthGatewayOnlyFrame(tabId);
+      if (authUrl) {
+        return buildHumanVerificationResponse(authUrl);
+      }
       await ensureContentScriptInjected(tabId);
       await new Promise((r) => setTimeout(r, 220));
     } else {
@@ -570,9 +720,9 @@ function connectDaemon() {
               tabId: tab.id,
               activeFrame: tabActiveFrames.get(tab.id),
               candidateFrames,
-              probeResults,
-              navFrames,
-              registered
+              probeResults: probeResults.map((p) => ({ ...p, url: sanitizeUrl(p.url) })),
+              navFrames: (navFrames || []).map((f) => ({ ...f, url: sanitizeUrl(f.url) })),
+              registered: registered.map((r) => ({ ...r, url: sanitizeUrl(r.url) }))
             }
           });
           return;
@@ -606,15 +756,19 @@ function connectDaemon() {
               success: true,
               data: {
                 tabId: tab.id,
-                url: tab.url,
+                url: sanitizeUrl(tab.url),
                 screenshotBase64: dataUrl.replace(/^data:image\/png;base64,/, "")
               }
             });
           } catch (e) {
+            const msg = e && e.message ? e.message : String(e);
+            const hint = /activeTab/i.test(msg)
+              ? " (On Firefox MV3, click the Efekta extension toolbar icon once or grant host permissions in about:addons)"
+              : "";
             safeWsSend(socket, {
               id: reqId,
               success: false,
-              error: "Screenshot capture failed: " + e.message
+              error: "Screenshot capture failed: " + msg + hint
             });
           }
           return;
@@ -634,6 +788,67 @@ function connectDaemon() {
           } else {
             await ensureSelfStudyFromLessonView(tab);
             response = await sendMessageToTopFrame(tab.id, req);
+            // When a lesson starts, the lesson player loads inside a cross-origin study.better.efekta.com iframe.
+            // Wait briefly for it to mount and return the real Step 1 state instead of empty top-frame state.
+            if (
+              response &&
+              response.success &&
+              response.lesson &&
+              lessonQuery !== "list" &&
+              lessonQuery !== "ls" &&
+              chrome.webNavigation &&
+              chrome.webNavigation.getAllFrames
+            ) {
+              let playerFrameId = null;
+              let authGatewaySeen = false;
+              const waitEnd = Date.now() + 8000;
+              while (Date.now() < waitEnd) {
+                const frames = await new Promise((resolve) =>
+                  chrome.webNavigation.getAllFrames({ tabId: tab.id }, resolve)
+                );
+                if (Array.isArray(frames)) {
+                  const player = frames.find((f) => f.frameId !== 0 && isStudyPlayerUrl(f.url));
+                  if (player) {
+                    playerFrameId = player.frameId;
+                    break;
+                  }
+                  if (frames.some((f) => isAuthGatewayUrl(f.url))) {
+                    authGatewaySeen = true;
+                  }
+                }
+                await new Promise((r) => setTimeout(r, 300));
+              }
+              if (playerFrameId !== null) {
+                await ensureContentScriptInjected(tab.id);
+                // Poll player frame until Angular bootstraps and renders elements (up to 5s)
+                let readyState = null;
+                const readyEnd = Date.now() + 5000;
+                while (Date.now() < readyEnd) {
+                  await new Promise((r) => setTimeout(r, 250));
+                  const stRes = await sendMsg(tab.id, { action: "status" }, { frameId: playerFrameId });
+                  if (stRes && stRes.success && stRes.data && stRes.data.elementsCount > 0) {
+                    tabActiveFrames.set(tab.id, playerFrameId);
+                    readyState = stRes.data;
+                    break;
+                  }
+                }
+                const playerRes = await sendMessageToTabWithRetry(tab.id, { action: "next", amount: 4 });
+                if (playerRes && playerRes.data && (playerRes.data.elementsCount > 0 || !readyState)) {
+                  response.data = playerRes.data;
+                  response.autoAdvance = playerRes;
+                } else if (readyState) {
+                  response.data = readyState;
+                  response.autoAdvance = playerRes;
+                }
+              } else if (authGatewaySeen) {
+                const authUrl = await detectAuthGatewayOnlyFrame(tab.id);
+                const hv = buildHumanVerificationResponse(authUrl || "https://catalyst-enter.better.efekta.com/");
+                response.message =
+                  (response.message || "Started lesson") +
+                  " (human verification required in browser)";
+                response.data = hv.data;
+              }
+            }
           }
         } else if (
           action === "batch" &&
@@ -716,6 +931,28 @@ if (chrome.tabs && chrome.tabs.onRemoved) {
   chrome.tabs.onRemoved.addListener((tabId) => {
     tabFrames.delete(tabId);
     tabActiveFrames.delete(tabId);
+  });
+}
+
+if (chrome.tabs && chrome.tabs.onActivated) {
+  chrome.tabs.onActivated.addListener(() => {
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      connectDaemon();
+    } else {
+      sendStatusUpdate("ping");
+    }
+  });
+}
+
+if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
+  chrome.webNavigation.onCommitted.addListener((details) => {
+    if (details && details.url && isEfektaUrl(details.url)) {
+      if (!ws || ws.readyState === WebSocket.CLOSED) {
+        connectDaemon();
+      } else {
+        sendStatusUpdate("ping");
+      }
+    }
   });
 }
 
@@ -867,7 +1104,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({
         wsConnected: !!(ws && ws.readyState === WebSocket.OPEN),
         hasEfektaTab: !!tab,
-        tabUrl: tab ? tab.url : ""
+        tabUrl: tab ? sanitizeUrl(tab.url) : ""
       });
     });
     return true;
@@ -885,7 +1122,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse({
           wsConnected: !!(ws && ws.readyState === WebSocket.OPEN),
           hasEfektaTab: !!tab,
-          tabUrl: tab ? tab.url : ""
+          tabUrl: tab ? sanitizeUrl(tab.url) : ""
         });
       });
     }, 300);

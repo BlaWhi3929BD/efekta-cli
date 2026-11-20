@@ -27,8 +27,10 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.efekta.com/*",
-        "https://*.better.efekta.com/*"
+        "https://*.study.better.efekta.com/*"
+      ],
+      "exclude_matches": [
+        "*://catalyst-enter.better.efekta.com/*"
       ],
       "js": ["injected.js"],
       "run_at": "document_start",
@@ -37,8 +39,11 @@
     },
     {
       "matches": [
-        "https://*.efekta.com/*",
-        "https://*.better.efekta.com/*"
+        "https://learn.better.efekta.com/*",
+        "https://*.study.better.efekta.com/*"
+      ],
+      "exclude_matches": [
+        "*://catalyst-enter.better.efekta.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_start",
@@ -49,8 +54,7 @@
     {
       "resources": ["injected.js"],
       "matches": [
-        "https://*.efekta.com/*",
-        "https://*.better.efekta.com/*"
+        "https://*.study.better.efekta.com/*"
       ]
     }
   ],
