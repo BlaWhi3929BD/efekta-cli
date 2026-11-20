@@ -54,6 +54,37 @@
     return "";
   }
 
+  function getClassTokens(clsOrEl) {
+    const raw = typeof clsOrEl === "string" ? clsOrEl : getClassName(clsOrEl);
+    return String(raw || "")
+      .toLowerCase()
+      .split(/\s+/)
+      .filter(Boolean);
+  }
+
+  function hasClassToken(clsOrEl, reOrToken) {
+    const tokens = getClassTokens(clsOrEl);
+    if (typeof reOrToken === "string") {
+      return tokens.includes(reOrToken.toLowerCase());
+    }
+    return tokens.some((tok) => reOrToken.test(tok));
+  }
+
+  function isCorrectClass(clsOrEl) {
+    return !isIncorrectClass(clsOrEl) && hasClassToken(clsOrEl, /(?:^|[-_])correct(?:$|[-_])/);
+  }
+
+  function isIncorrectClass(clsOrEl) {
+    return hasClassToken(clsOrEl, /(?:^|[-_])incorrect(?:$|[-_])/);
+  }
+
+  function isDisabledClass(clsOrEl) {
+    // "mat-mdc-tooltip-disabled" only means "no tooltip", NOT "control disabled"
+    return getClassTokens(clsOrEl).some(
+      (tok) => tok !== "mat-mdc-tooltip-disabled" && /(?:^|[-_])disabled(?:$|[-_])/.test(tok)
+    );
+  }
+
   // Register frame with background service so commands can be routed directly to iframes,
   // and send a lightweight 10s keepalive ping from HTTPS tabs so Firefox MV3 event page never stays asleep for 60s.
   try {
@@ -1178,10 +1209,8 @@
 
       // Skip already completed matching pairs
       if (
-        cls.includes("matching-option-wp") &&
-        (cls.includes("correct") ||
-          (el.parentElement &&
-            getClassName(el.parentElement).toLowerCase().includes("correct")))
+        hasClassToken(cls, "matching-option-wp") &&
+        (isCorrectClass(cls) || (el.parentElement && isCorrectClass(el.parentElement)))
       ) {
         continue;
       }
@@ -1456,8 +1485,7 @@
       let disabled =
         el.disabled === true ||
         el.getAttribute("aria-disabled") === "true" ||
-        // "mat-mdc-tooltip-disabled" only means "no tooltip", NOT "control disabled"
-        cls.replace(/mat-mdc-tooltip-disabled/g, "").includes("disabled");
+        isDisabledClass(cls);
       if (type !== "mic_btn") {
         disabled = disabled || cls.includes("no-pointer");
       }
@@ -1651,10 +1679,10 @@
     for (const f of feedbackEls) {
       const fText = cleanText(f);
       const fCls = (typeof f.className === "string" ? f.className : "").toLowerCase();
-      if (fCls.includes("incorrect") || fCls.includes("wrong") || fCls.includes("error")) {
+      if (isIncorrectClass(fCls) || hasClassToken(fCls, /(?:^|[-_])(wrong|error)(?:$|[-_])/)) {
         feedback = "incorrect: " + fText.slice(0, 100);
         break;
-      } else if (fCls.includes("correct") || fCls.includes("success")) {
+      } else if (isCorrectClass(fCls) || hasClassToken(fCls, /(?:^|[-_])success(?:$|[-_])/)) {
         feedback = "correct: " + fText.slice(0, 100);
         break;
       } else if (fText.length > 0 && fText.length < 120) {
@@ -1883,7 +1911,7 @@
           const isLocked =
             !isUnlocked &&
             (!!domEl.querySelector(".is-correct, .correct") ||
-              getClassName(domEl).toLowerCase().includes("correct") ||
+              isCorrectClass(domEl) ||
               docs.some((d) => d.querySelector("ef-sequencing-sort-column-item .is-unassessed")));
           if (isLocked) return `${i.id}: [✓] ${i.text}`;
         }
@@ -2247,7 +2275,7 @@
         await sleep(40);
         const lCls = getClassName(lEl).toLowerCase();
         const rCls = getClassName(rEl).toLowerCase();
-        if (lCls.includes("correct") || rCls.includes("correct") || !lEl.isConnected) {
+        if (isCorrectClass(lCls) || isCorrectClass(rCls) || !lEl.isConnected) {
           break;
         }
       }
@@ -3751,7 +3779,7 @@
     let finalState = inspectState();
     if (!finalState.canProceed) {
       const remChoices = finalState.elements.filter(
-        (e) => e.type === "choice" && !e.disabled && !(e.className || "").includes("incorrect")
+        (e) => e.type === "choice" && !e.disabled && !isIncorrectClass(e.className || "")
       );
       if (remChoices.length === 1) {
         await sleep(220);
@@ -3995,8 +4023,7 @@
         list.push(
           ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter((b) => {
             if (!isVisible(b)) return false;
-            const cls = getClassName(b).toLowerCase();
-            return !cls.includes("correct");
+            return !isCorrectClass(b);
           })
         );
       }
@@ -4041,15 +4068,14 @@
       }
 
       const candidates = opts.filter((o) => {
-        const cls = getClassName(o).toLowerCase();
-        if (cls.includes("disabled") || cls.includes("incorrect")) return false;
+        if (isDisabledClass(o) || isIncorrectClass(o)) return false;
         const t = cleanText(o).toLowerCase();
         return t && !triedSet.has(t);
       });
       const pool =
         candidates.length > 0
           ? candidates
-          : opts.filter((o) => !getClassName(o).toLowerCase().includes("disabled"));
+          : opts.filter((o) => !isDisabledClass(o));
 
       if (pool.length === 0) break;
 
@@ -4067,14 +4093,12 @@
             gapSolved = true;
             break;
           }
-          const gCls = getClassName(gapBtn).toLowerCase();
-          const oCls = getClassName(opt).toLowerCase();
-          if (gCls.includes("correct") || oCls.includes("correct")) {
-            gapSolved = true;
+          if (isIncorrectClass(gapBtn) || isIncorrectClass(opt)) {
+            wasWrong = true;
             break;
           }
-          if (gCls.includes("incorrect") || oCls.includes("incorrect")) {
-            wasWrong = true;
+          if (isCorrectClass(gapBtn) || isCorrectClass(opt)) {
+            gapSolved = true;
             break;
           }
         }
@@ -4168,14 +4192,12 @@
             committed = true;
             break;
           }
-          const iCls = getClassName(itemEl).toLowerCase();
-          const sCls = getClassName(slotEl).toLowerCase();
-          if (iCls.includes("correct")) {
-            committed = true;
+          if (isIncorrectClass(itemEl) || isIncorrectClass(slotEl) || isDisabledClass(itemEl)) {
+            wasWrong = true;
             break;
           }
-          if (iCls.includes("incorrect") || sCls.includes("incorrect") || iCls.includes("disabled")) {
-            wasWrong = true;
+          if (isCorrectClass(itemEl)) {
+            committed = true;
             break;
           }
         }
@@ -4218,16 +4240,15 @@
     // Only .correct or detached/hidden means matched; .disabled alone is a temporary wrong-pair cooldown!
     const isCardDone = (el) => {
       if (!el || !el.isConnected || !isVisible(el)) return true;
-      const cls = getClassName(el).toLowerCase();
-      const pCls = el.parentElement ? getClassName(el.parentElement).toLowerCase() : "";
-      return cls.includes("correct") || pCls.includes("correct");
+      return isCorrectClass(el) || (el.parentElement && isCorrectClass(el.parentElement));
     };
     const isCardCoolingDown = (el) => {
       if (!el || !el.isConnected || !isVisible(el)) return false;
-      const cls = getClassName(el).toLowerCase();
-      if (cls.includes("correct")) return false;
-      return cls.includes("disabled") || cls.includes("incorrect");
+      if (isCorrectClass(el)) return false;
+      return isDisabledClass(el) || isIncorrectClass(el) || !!el.disabled;
     };
+
+    let usedHeuristic = false;
 
     for (let guard = 0; guard < 36; guard++) {
       await waitUntilUnlocked(2400);
@@ -4327,7 +4348,8 @@
       }
 
       const sug = suggestImageWordPairs(activeCards);
-      if (sug && sug.pairs.length > 0 && guard === 0) {
+      if (sug && sug.pairs.length > 0 && !usedHeuristic) {
+        usedHeuristic = true;
         const spec = sug.pairs.map((p) => `${p.img}:${p.word}`).join(", ");
         await executePair(spec);
         continue;
@@ -4411,17 +4433,16 @@
 
     const isItemUnlocked = (el) => {
       if (!el) return false;
-      const cls = getClassName(el).toLowerCase();
-      if (cls.includes("is-correct") || cls.includes("correct") || el.querySelector(".is-correct, .correct")) {
+      if (isCorrectClass(el) || el.querySelector(".is-correct, .correct")) {
         return false;
       }
-      if (cls.includes("is-unassessed") || el.querySelector(".is-unassessed")) {
+      if (hasClassToken(el, "is-unassessed") || el.querySelector(".is-unassessed")) {
         return true;
       }
       // If no items have .is-unassessed yet, treat as unlocked until Check locks them
       const all = getSortItems();
       const anyUnassessed = all.some(
-        (x) => getClassName(x).toLowerCase().includes("is-unassessed") || x.querySelector(".is-unassessed")
+        (x) => hasClassToken(x, "is-unassessed") || x.querySelector(".is-unassessed")
       );
       return !anyUnassessed;
     };
@@ -4974,7 +4995,7 @@
       if (m) {
         const id = m[1];
         const elMeta = (st.elements || []).find((e) => e.id === id);
-        const isIncorrect = elMeta && (elMeta.className || "").includes("incorrect");
+        const isIncorrect = elMeta && isIncorrectClass(elMeta.className || "");
         out.push({
           id,
           letter: (m[2] || "").toUpperCase(),
@@ -5553,17 +5574,14 @@
     const getUnassessedOrderedBtns = () =>
       Array.from(orderedList.querySelectorAll("button.item, button")).filter((b) => {
         if (!isVisible(b) || b.disabled) return false;
-        const cls = getClassName(b).toLowerCase();
-        const pCls = b.parentElement ? getClassName(b.parentElement).toLowerCase() : "";
-        return !cls.includes("correct") && !cls.includes("is-correct") && !pCls.includes("correct");
+        return !isCorrectClass(b) && !(b.parentElement && isCorrectClass(b.parentElement));
       });
     const getLockedPrefixLen = () => {
       const lis = Array.from(orderedList.children || []).filter((li) => isVisible(li));
       return lis.filter((li) => {
         const txt = cleanText(li);
         if (!txt) return false;
-        const cls = getClassName(li).toLowerCase();
-        if (cls.includes("is-unassessed")) return false;
+        if (hasClassToken(li, "is-unassessed")) return false;
         return !li.querySelector(".is-unassessed");
       }).length;
     };
@@ -5577,13 +5595,14 @@
       return null;
     };
 
-    // Return any pre-placed unlocked tokens back into the pool first
-    const prePlaced = getUnassessedOrderedBtns();
-    for (let i = prePlaced.length - 1; i >= 0; i--) {
-      await simulateClick(prePlaced[i]);
-      await sleep(40);
+    // Return any pre-placed unlocked tokens back into the pool first (re-query in case Angular re-renders)
+    for (let g = 0; g < 16; g++) {
+      const prePlaced = getUnassessedOrderedBtns();
+      if (prePlaced.length === 0) break;
+      await waitUntilUnlocked(600);
+      await simulateClick(prePlaced[prePlaced.length - 1]);
+      await sleep(65);
     }
-    if (prePlaced.length > 0) await sleep(80);
 
     const triedByPos = new Map();
     let rounds = 0;
@@ -5628,7 +5647,7 @@
         if (alreadyTried) rank += 100;
         if (pos === 0 && isCapNonEnd) rank -= 20;
         if (pool.length > 1 && isTerminalPunct) rank += 10;
-        return { el, text, key, isTerminalPunct, rank, idx };
+        return { text, key, isTerminalPunct, rank, idx };
       });
       scored.sort((a, b) => a.rank - b.rank || a.idx - b.idx);
 
@@ -5643,15 +5662,44 @@
         .filter((x) => x !== head)
         .sort((a, b) => Number(a.isTerminalPunct) - Number(b.isTerminalPunct) || a.idx - b.idx);
 
-      const trialOrder = [head, ...tail];
-      for (const tok of trialOrder) {
-        if (!tok.el.isConnected) continue;
-        await simulateClick(tok.el);
-        await sleep(45);
+      // Re-query unordered pool on each tap so Angular @for / CDK DOM replacement never skips stale nodes
+      const plannedTokens = [head, ...tail];
+      const countOrderedBtns = () => orderedList.querySelectorAll("button.item, button").length;
+      for (const tok of plannedTokens) {
+        await waitUntilUnlocked(600);
+        const curPool = getPoolBtns();
+        if (curPool.length === 0) break;
+        const btn =
+          curPool.find((b) => norm(cleanText(b)) === tok.key) ||
+          curPool.find((b) => cleanText(b) === tok.text) ||
+          curPool[0];
+        if (!btn) continue;
+        const poolLenBefore = curPool.length;
+        const olLenBefore = countOrderedBtns();
+        await simulateClick(btn);
+        const m0 = Date.now();
+        while (Date.now() - m0 < 240) {
+          await sleep(25);
+          if (getPoolBtns().length < poolLenBefore || countOrderedBtns() > olLenBefore) {
+            break;
+          }
+        }
+        await sleep(30);
       }
-      await sleep(70);
+      for (let extra = 0; extra < 12; extra++) {
+        const leftPool = getPoolBtns();
+        if (leftPool.length === 0) break;
+        await waitUntilUnlocked(600);
+        await simulateClick(leftPool[0]);
+        await sleep(65);
+      }
 
-      const checkBtn = findCheckBtn();
+      const chkStart = Date.now();
+      let checkBtn = findCheckBtn();
+      while (checkBtn && checkBtn.disabled && Date.now() - chkStart < 450) {
+        await sleep(35);
+        checkBtn = findCheckBtn();
+      }
       if (!checkBtn || checkBtn.disabled) break;
       await simulateClick(checkBtn);
       rounds++;
@@ -5695,6 +5743,8 @@
     const steps = [];
     const notes = [];
     const jumpedToActivities = new Set();
+    let lastStepPassedCount = 0;
+    let lastStepTotal = 0;
     let lastSig = "";
     let same = 0;
     let emptyWaits = 0;
@@ -5755,6 +5805,17 @@
       // Step-level Activity Planner:
       // 1) If we landed on "Step not passed. Pass at least X activities...", jump directly to the first incomplete activity!
       const stepPlan = analyzeStepActivities(st);
+      if (!stepPlan) {
+        if (jumpedToActivities.size > 0) jumpedToActivities.clear();
+        lastStepPassedCount = 0;
+        lastStepTotal = 0;
+      } else {
+        if (stepPlan.total !== lastStepTotal || stepPlan.passedCount < lastStepPassedCount) {
+          jumpedToActivities.clear();
+        }
+        lastStepTotal = stepPlan.total;
+        lastStepPassedCount = stepPlan.passedCount;
+      }
       const isStepNotPassedScreen = /step not passed|pass at least \d+ activit/i.test(
         `${st.prompt || ""} ${(st.contextText || []).join(" ")}`
       );
@@ -5815,6 +5876,8 @@
 
       // 3) Smart step skip: if >50% of activities in this multi-activity regular step are ALREADY 100%,
       // jump directly to Step Summary BEFORE running any slower solvers!
+      const summaryJumpKey =
+        stepPlan && stepPlan.summaryEl ? `summary:${stepPlan.summaryEl.id}:${sig}` : "";
       if (
         !st.isProgressTest &&
         !isAvatarContext(st) &&
@@ -5824,9 +5887,9 @@
         stepPlan.total >= 2 &&
         stepPlan.stepAlreadyPassable &&
         stepPlan.summaryEl &&
-        !jumpedToActivities.has(stepPlan.summaryEl.id)
+        !jumpedToActivities.has(summaryJumpKey)
       ) {
-        jumpedToActivities.add(stepPlan.summaryEl.id);
+        jumpedToActivities.add(summaryJumpKey);
         const sumEl = resolveElement(stepPlan.summaryEl.id);
         if (sumEl) {
           await simulateClick(sumEl);
@@ -5975,9 +6038,9 @@
           stepPlan &&
           stepPlan.stepAlreadyPassable &&
           stepPlan.summaryEl &&
-          !jumpedToActivities.has(stepPlan.summaryEl.id)
+          !jumpedToActivities.has(summaryJumpKey)
         ) {
-          jumpedToActivities.add(stepPlan.summaryEl.id);
+          jumpedToActivities.add(summaryJumpKey);
           const sumEl = resolveElement(stepPlan.summaryEl.id);
           if (sumEl) {
             await simulateClick(sumEl);

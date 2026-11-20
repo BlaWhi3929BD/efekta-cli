@@ -2363,3 +2363,177 @@ test("video_stage clicks Play overlay control with <video>, summary-option is ig
   assert.equal(sortAttempts, 0);
   assert.equal(autoRes.stoppedAt, "lesson_completed");
 });
+
+test("matching_pairs handles mat-mdc-tooltip-disabled and incorrect classes, solve_sentence survives DOM node replacement, and step-planner resets across steps", async () => {
+  // 1. matching_pairs Case B: mat-mdc-tooltip-disabled on image cards must NOT disable them,
+  //    and "incorrect" class must NEVER match isCorrectClass("incorrect")
+  const hPair = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  let selectedCard = null;
+  const pairNext = new hPair.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  const cards = [];
+  const makePairCard = (text, extraCls, key) => {
+    const c = new hPair.FakeElement("div", {
+      className: `matching-option-wp ${extraCls}`,
+      text,
+      onclick() {
+        if (!selectedCard) {
+          selectedCard = c;
+          return;
+        }
+        if (selectedCard !== c && selectedCard._key === c._key) {
+          selectedCard.className += " correct";
+          c.className += " correct";
+          selectedCard = null;
+          if (cards.every((x) => x.className.split(/\s+/).includes("correct"))) {
+            pairNext.disabled = false;
+          }
+        } else {
+          selectedCard.className += " incorrect";
+          c.className += " incorrect";
+          const a = selectedCard;
+          const b = c;
+          selectedCard = null;
+          setTimeout(() => {
+            a.className = a.className.replace(/\bincorrect\b/g, "").trim();
+            b.className = b.className.replace(/\bincorrect\b/g, "").trim();
+          }, 50);
+        }
+      }
+    });
+    c._key = key;
+    cards.push(c);
+    hPair.doc.body.appendChild(c);
+    return c;
+  };
+  makePairCard("Image of a team meeting", "image mat-mdc-tooltip-disabled", "meet");
+  makePairCard("Image of someone laughing", "image mat-mdc-tooltip-disabled", "laugh");
+  const meetWord = makePairCard("team meeting", "incorrect", "meet"); // Transient incorrect must not read as correct!
+  makePairCard("laughing", "", "laugh");
+  hPair.doc.body.appendChild(pairNext);
+  setTimeout(() => {
+    meetWord.className = "matching-option-wp";
+  }, 80);
+
+  const stPair = await hPair.dispatchCommand({ action: "status" });
+  const imgItem = stPair.data.elements.find((e) => e.text.includes("Image of a team meeting"));
+  assert.equal(imgItem.disabled, false);
+  assert.ok(stPair.data.elements.some((e) => e.text === "team meeting"));
+
+  const pairRes = await hPair.dispatchCommand({ action: "solve_pair" });
+  assert.equal(pairRes.success, true);
+  assert.equal(pairNext.disabled, false);
+
+  // 2. solve_sentence handles Angular re-rendering unordered buttons on every click
+  const hSeq = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const container = new hSeq.FakeElement("ef-sequencing-tap-option-task");
+  const ordered = new hSeq.FakeElement("ol", { className: "ordered-item-container" });
+  const unordered = new hSeq.FakeElement("ul", { className: "unordered-item-container" });
+  const seqExpected = ["Who", "saw", "it?"];
+  const makeReRenderingBtn = (word, inOrdered) => {
+    const li = new hSeq.FakeElement("li", { className: "cdk-drag cdk-drag-disabled" });
+    const btn = new hSeq.FakeElement("button", {
+      className: "item is-unassessed",
+      text: word,
+      onclick() {
+        if (!inOrdered) {
+          // Simulate Angular replacing ALL remaining ul buttons on click so old refs disconnect!
+          const remaining = unordered.children
+            .map((x) => x.textContent.trim())
+            .filter(Boolean);
+          const idx = remaining.indexOf(word);
+          if (idx >= 0) remaining.splice(idx, 1);
+          unordered.children = [];
+          unordered.childNodes = [];
+          for (const rem of remaining) {
+            unordered.appendChild(makeReRenderingBtn(rem, false));
+          }
+          ordered.appendChild(makeReRenderingBtn(word, true));
+          checkSeqBtn.disabled = unordered.children.length > 0;
+        }
+      }
+    });
+    li.appendChild(btn);
+    return li;
+  };
+  for (const w of ["it?", "Who", "saw"]) unordered.appendChild(makeReRenderingBtn(w, false));
+  const checkSeqBtn = new hSeq.FakeElement("button", {
+    className: "check-task-button",
+    text: "Check",
+    disabled: true,
+    onclick() {
+      const wordsNow = ordered.children.map((li) => li.textContent.trim());
+      if (wordsNow.join(" ") === seqExpected.join(" ")) {
+        checkSeqBtn.childNodes = [];
+        checkSeqBtn.appendText("Next");
+        checkSeqBtn.disabled = false;
+        return;
+      }
+      ordered.children = [];
+      ordered.childNodes = [];
+      unordered.children = [];
+      unordered.childNodes = [];
+      for (const w of ["it?", "Who", "saw"]) unordered.appendChild(makeReRenderingBtn(w, false));
+      checkSeqBtn.disabled = true;
+    }
+  });
+  container.appendChild(ordered);
+  container.appendChild(unordered);
+  hSeq.doc.body.appendChild(container);
+  hSeq.doc.body.appendChild(checkSeqBtn);
+
+  const seqRes = await hSeq.dispatchCommand({ action: "solve_sentence" });
+  assert.equal(seqRes.success, true);
+  assert.deepEqual(
+    ordered.children.map((li) => li.textContent.trim()),
+    seqExpected
+  );
+
+  // 3. step-planner resets jumpedToActivities between steps sharing "act-4" summary pill
+  const hMulti = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  let step2SortAttempts = 0;
+  let step2Jumped = false;
+  const renderStep = (stepNum) => {
+    hMulti.doc.body.children = [];
+    hMulti.doc.body.childNodes = [];
+    const nav = new hMulti.FakeElement("ef-activity-navigator");
+    nav.appendChild(new hMulti.FakeElement("div", { className: "wp", text: "Step navigation, Activity 1 of 3, Activity complete" }));
+    nav.appendChild(new hMulti.FakeElement("div", { className: "wp", text: "Step navigation, Activity 2 of 3, Activity complete" }));
+    nav.appendChild(new hMulti.FakeElement("div", { className: "wp selected", text: "Step navigation, Activity 3 of 3, 0% complete" }));
+    nav.appendChild(
+      new hMulti.FakeElement("div", {
+        className: "wp",
+        text: "Step summary",
+        onclick() {
+          if (stepNum === 1) {
+            renderStep(2);
+          } else {
+            step2Jumped = true;
+            hMulti.doc.body.children = [];
+            hMulti.doc.body.childNodes = [];
+            hMulti.doc.body.appendChild(new hMulti.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 1 Passed" }));
+            hMulti.doc.body.appendChild(new hMulti.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 2 Passed" }));
+          }
+        }
+      })
+    );
+    hMulti.doc.body.appendChild(nav);
+    const wrap = new hMulti.FakeElement("div");
+    wrap.appendChild(new hMulti.FakeElement("button", { className: "item target", text: "A" }));
+    wrap.appendChild(new hMulti.FakeElement("button", { className: "item target", text: "B" }));
+    wrap.appendChild(new hMulti.FakeElement("button", {
+      className: "item option",
+      text: `step${stepNum}`,
+      onclick() {
+        if (stepNum === 2) step2SortAttempts++;
+      }
+    }));
+    wrap.appendChild(new hMulti.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true }));
+    hMulti.doc.body.appendChild(wrap);
+  };
+  renderStep(1);
+  const multiRes = await hMulti.dispatchCommand({ action: "autopilot", target: "8" });
+  assert.equal(multiRes.success, true);
+  assert.equal(step2Jumped, true);
+  assert.equal(step2SortAttempts, 0);
+  assert.equal(multiRes.stoppedAt, "lesson_completed");
+});

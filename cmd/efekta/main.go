@@ -171,7 +171,7 @@ func ensureDaemon() error {
 		select {
 		case waitErr := <-waitCh:
 			if isDaemonRunning() {
-				waitForBrowserConnected(HealthURL, 4000*time.Millisecond, 150*time.Millisecond)
+				waitForBrowserConnected(HealthURL, 6000*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 			if tail := readDaemonLogTail(logPath); tail != "" {
@@ -183,7 +183,7 @@ func ensureDaemon() error {
 			return fmt.Errorf("daemon exited during startup (%v) (log: %s)", waitErr, logPath)
 		case <-time.After(100 * time.Millisecond):
 			if isDaemonRunning() {
-				waitForBrowserConnected(HealthURL, 4000*time.Millisecond, 150*time.Millisecond)
+				waitForBrowserConnected(HealthURL, 6000*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 		}
