@@ -1,6 +1,10 @@
 package protocol
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 func TestParseBatchDialogueAndAuto(t *testing.T) {
 	subs := ParseBatchString("dialogue B,C once; auto 20 speak; next")
@@ -95,5 +99,37 @@ func TestParseBatchStatusAndState(t *testing.T) {
 	}
 	if subs[3].Action != "solve_gaps" || subs[4].Action != "solve_sort" || subs[5].Action != "solve_pair" || subs[6].Action != "solve_order" || subs[7].Action != "solve_auto" {
 		t.Errorf("unexpected solve subcommands: %+v", subs[3:])
+	}
+}
+
+func TestParseBatchWaitUnitsEvalAndResponseFields(t *testing.T) {
+	subs := ParseBatchString(`wait 2s; wait 1500ms; eval "button.item"`)
+	if len(subs) != 3 {
+		t.Fatalf("expected 3 subcommands, got %d: %+v", len(subs), subs)
+	}
+	if subs[0].Action != "sleep" || subs[0].DelayMs != 2000 || subs[0].Target != "2000" {
+		t.Errorf("expected wait 2s -> 2000ms, got %+v", subs[0])
+	}
+	if subs[1].Action != "sleep" || subs[1].DelayMs != 1500 || subs[1].Target != "1500" {
+		t.Errorf("expected wait 1500ms -> 1500ms, got %+v", subs[1])
+	}
+	if subs[2].Action != "eval" || subs[2].Target != "button.item" {
+		t.Errorf("expected eval button.item, got %+v", subs[2])
+	}
+
+	needAgent := true
+	resp := Response{
+		Success:    true,
+		StoppedAt:  "lesson_completed",
+		NeedsAgent: &needAgent,
+		Steps:      []string{"solved order sentence"},
+	}
+	raw, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	s := string(raw)
+	if !strings.Contains(s, `"stoppedAt":"lesson_completed"`) || !strings.Contains(s, `"steps":["solved order sentence"]`) {
+		t.Errorf("expected Response to serialize stoppedAt and steps, got %s", s)
 	}
 }

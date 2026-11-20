@@ -61,10 +61,70 @@ function matchesSimpleSelector(el, sel) {
   return true;
 }
 
+function splitTopLevelCommas(sel) {
+  const out = [];
+  let cur = "";
+  let bracket = 0;
+  let quote = "";
+  for (const ch of String(sel || "")) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = "";
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+    } else if (ch === "[") {
+      bracket++;
+      cur += ch;
+    } else if (ch === "]") {
+      if (bracket > 0) bracket--;
+      cur += ch;
+    } else if (ch === "," && bracket === 0) {
+      if (cur.trim()) out.push(cur.trim());
+      cur = "";
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out;
+}
+
+function splitSelectorTokens(part) {
+  const out = [];
+  let cur = "";
+  let bracket = 0;
+  let quote = "";
+  for (const ch of String(part || "")) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = "";
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      cur += ch;
+    } else if (ch === "[") {
+      bracket++;
+      cur += ch;
+    } else if (ch === "]") {
+      if (bracket > 0) bracket--;
+      cur += ch;
+    } else if (/\s/.test(ch) && bracket === 0) {
+      if (cur) {
+        out.push(cur);
+        cur = "";
+      }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
 function matchesSelectorList(el, selector) {
-  const parts = selector.split(",").map((x) => x.trim()).filter(Boolean);
+  const parts = splitTopLevelCommas(selector);
   return parts.some((part) => {
-    const tokens = part.split(/\s+/).filter(Boolean);
+    const tokens = splitSelectorTokens(part);
     if (tokens.length === 1) return matchesSimpleSelector(el, tokens[0]);
     if (tokens.length >= 2) {
       if (!matchesSimpleSelector(el, tokens[tokens.length - 1])) return false;
@@ -2025,4 +2085,281 @@ test("4-column Verb/Noun table pairs cells by (idx ^ 1) and executeLesson('list'
   assert.equal(lessons[1].status, "locked");
   assert.equal(lessons[1].locked, true);
   assert.equal(lessons[1].completed, false);
+});
+
+test("solveCategorizeColumns skips distractors and solveMatchingPairs waits through .disabled cooldown", async () => {
+  // 1. Distractor in position 0 must be skipped after failing all categories, not retried 35 times
+  const hSort = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const nextSort = new hSort.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  let picked = null;
+  let distractorClicks = 0;
+
+  const distItem = new hSort.FakeElement("button", {
+    className: "item option",
+    text: "shop for special clothing",
+    onclick() {
+      picked = distItem;
+      distractorClicks++;
+    }
+  });
+  const realItem = new hSort.FakeElement("button", {
+    className: "item option",
+    text: "stay home and cook",
+    onclick() {
+      picked = realItem;
+    }
+  });
+  const makeSlot = (name) =>
+    new hSort.FakeElement("button", {
+      className: "item target",
+      text: name,
+      onclick() {
+        if (!picked) return;
+        if (picked === realItem && name === "women") {
+          realItem.remove();
+          picked = null;
+          nextSort.disabled = false;
+        } else {
+          picked.classList.add("incorrect");
+          setTimeout(() => picked && picked.classList.remove("incorrect"), 35);
+        }
+      }
+    });
+
+  hSort.doc.body.appendChild(makeSlot("women"));
+  hSort.doc.body.appendChild(makeSlot("men"));
+  hSort.doc.body.appendChild(distItem);
+  hSort.doc.body.appendChild(realItem);
+  hSort.doc.body.appendChild(nextSort);
+
+  const sortRes = await hSort.dispatchCommand({ action: "solve_sort" });
+  assert.equal(sortRes.success, true);
+  assert.equal(nextSort.disabled, false);
+  assert.ok(distractorClicks <= 3, `expected distractor to be skipped after 1 pass, got ${distractorClicks} clicks`);
+
+  // 2. Matching pairs with temporary .disabled cooldown must NOT treat .disabled as .correct
+  const hPair = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const nextPair = new hPair.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  const answers = { conversation: "two or more talking", gender: "male or female" };
+  let selLeft = null;
+  let solvedPairs = 0;
+
+  const mkLeft = (txt) => {
+    const el = new hPair.FakeElement("div", {
+      className: "matching-option-wp target",
+      text: txt,
+      onclick() {
+        selLeft = el;
+      }
+    });
+    return el;
+  };
+  const mkRight = (txt) => {
+    const el = new hPair.FakeElement("div", {
+      className: "matching-option-wp option",
+      text: txt,
+      onclick() {
+        if (!selLeft) return;
+        if (answers[selLeft.textContent] === txt) {
+          selLeft.classList.add("correct");
+          el.classList.add("correct");
+          solvedPairs++;
+          if (solvedPairs === 2) nextPair.disabled = false;
+        } else {
+          const l = selLeft;
+          l.classList.add("disabled");
+          el.classList.add("disabled");
+          setTimeout(() => {
+            l.classList.remove("disabled");
+            el.classList.remove("disabled");
+          }, 80);
+        }
+        selLeft = null;
+      }
+    });
+    return el;
+  };
+
+  hPair.doc.body.appendChild(mkLeft("conversation"));
+  hPair.doc.body.appendChild(mkLeft("gender"));
+  hPair.doc.body.appendChild(mkRight("male or female"));
+  hPair.doc.body.appendChild(mkRight("two or more talking"));
+  hPair.doc.body.appendChild(nextPair);
+
+  const pairRes = await hPair.dispatchCommand({ action: "solve_pair" });
+  assert.equal(pairRes.success, true);
+  assert.equal(nextPair.disabled, false);
+  assert.deepEqual(Array.from(pairRes.data.matched), [
+    "conversation -> two or more talking",
+    "gender -> male or female"
+  ]);
+});
+
+test("solveOrderSentence solves tap-sequencing with prefix locking and Progress Test blocks it", async () => {
+  const h = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const container = new h.FakeElement("ef-sequencing-tap-option-task");
+  const ordered = new h.FakeElement("ol", { className: "ordered-item-container" });
+  const unordered = new h.FakeElement("ul", { className: "unordered-item-container" });
+  const expected = ["What", "if", "they", "bring", "managers?"];
+
+  // Pre-locked starting token without .is-unassessed
+  ordered.appendChild(new h.FakeElement("li", { text: "What" }));
+
+  const makeTok = (word) => {
+    const btn = new h.FakeElement("button", {
+      className: "item is-unassessed",
+      text: word,
+      onclick() {
+        if (unordered.children.includes(btn)) {
+          btn.remove();
+          const li = new h.FakeElement("li");
+          li.appendChild(btn);
+          ordered.appendChild(li);
+          if (unordered.children.length === 0) checkBtn.disabled = false;
+        } else {
+          const wrapLi = btn.parentElement;
+          btn.remove();
+          if (wrapLi && wrapLi.parentElement === ordered) wrapLi.remove();
+          unordered.appendChild(btn);
+          checkBtn.disabled = true;
+        }
+      }
+    });
+    return btn;
+  };
+
+  for (const w of ["managers?", "bring", "if", "they"]) {
+    unordered.appendChild(makeTok(w));
+  }
+
+  const checkBtn = new h.FakeElement("button", {
+    className: "check-task-button",
+    text: "Check",
+    disabled: true,
+    onclick() {
+      const wordsNow = ordered.children.map((li) => li.textContent.trim());
+      let prefixMatch = 0;
+      while (prefixMatch < wordsNow.length && prefixMatch < expected.length && wordsNow[prefixMatch] === expected[prefixMatch]) {
+        prefixMatch++;
+      }
+      if (prefixMatch === expected.length) {
+        checkBtn.childNodes = [];
+        checkBtn.appendText("Next");
+        checkBtn.disabled = false;
+        return;
+      }
+      setTimeout(() => {
+        const toReturn = ordered.children.slice(prefixMatch);
+        for (const li of toReturn) {
+          const tokText = li.textContent.trim();
+          li.remove();
+          unordered.appendChild(makeTok(tokText));
+        }
+        // Replace matched unlocked items with plain locked <li>
+        ordered.children.forEach((li, idx) => {
+          if (idx < prefixMatch) {
+            const txt = li.textContent.trim();
+            li.children = [];
+            li.childNodes = [];
+            li.appendText(txt);
+          }
+        });
+        checkBtn.disabled = true;
+      }, 45);
+    }
+  });
+
+  container.appendChild(ordered);
+  container.appendChild(unordered);
+  h.doc.body.appendChild(container);
+  h.doc.body.appendChild(checkBtn);
+
+  const res = await h.dispatchCommand({ action: "solve_sentence" });
+  assert.equal(res.success, true);
+  assert.deepEqual(
+    ordered.children.map((li) => li.textContent.trim()),
+    expected
+  );
+
+  // Progress Test must block solve_sentence
+  const hPt = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  hPt.doc.body.appendChild(new hPt.FakeElement("ef-test-player"));
+  const ptSeq = new hPt.FakeElement("ef-sequencing-tap-option-task");
+  ptSeq.appendChild(new hPt.FakeElement("ol", { className: "ordered-item-container" }));
+  ptSeq.appendChild(new hPt.FakeElement("ul", { className: "unordered-item-container" }));
+  hPt.doc.body.appendChild(ptSeq);
+  const ptRes = await hPt.dispatchCommand({ action: "solve_sentence" });
+  assert.equal(ptRes.success, false);
+  assert.match(ptRes.error, /Progress Test/i);
+});
+
+test("video_stage clicks Play overlay control with <video>, summary-option is ignored, and autopilot skips to summary when >50% complete", async () => {
+  // 1. video_stage overlay click unlocks Next even when <video> exists in DOM
+  const hVid = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const vid = new hVid.FakeElement("video");
+  vid.duration = 38.5;
+  vid.currentTime = 0;
+  vid.paused = true;
+  vid.ended = false;
+  const nextVid = new hVid.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  let overlayClicked = false;
+  const playOverlay = new hVid.FakeElement("button", {
+    className: "btn",
+    attrs: { "aria-label": "Play audio" },
+    onclick() {
+      overlayClicked = true;
+      nextVid.disabled = false;
+    }
+  });
+  hVid.doc.body.appendChild(vid);
+  hVid.doc.body.appendChild(playOverlay);
+  hVid.doc.body.appendChild(nextVid);
+
+  const nextRes = await hVid.dispatchCommand({ action: "next", amount: 1 });
+  assert.equal(nextRes.success, true);
+  assert.equal(overlayClicked, true);
+  assert.equal(nextRes.hops, 1);
+
+  // 2. li.summary-option must NOT make summary screen classify as multiple_choice
+  const hSum = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  hSum.doc.body.appendChild(new hSum.FakeElement("li", { className: "summary-option", text: "cater to husband's needs" }));
+  hSum.doc.body.appendChild(new hSum.FakeElement("li", { className: "summary-option", text: "make decisions" }));
+  hSum.doc.body.appendChild(new hSum.FakeElement("button", { className: "next-task-button", text: "Next", disabled: false }));
+  const sumSt = await hSum.dispatchCommand({ action: "status" });
+  assert.equal(sumSt.data.exerciseType, "passive_screen");
+
+  // 3. Autopilot jumps directly to Step summary BEFORE invoking categorize solver when >50% activities passed
+  const hPlan = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  let sortAttempts = 0;
+  let jumpedSummary = false;
+  const nav = new hPlan.FakeElement("ef-activity-navigator");
+  const taskWrap = new hPlan.FakeElement("div");
+  nav.appendChild(new hPlan.FakeElement("div", { className: "wp", text: "Step navigation, Activity 1 of 3, Activity complete" }));
+  nav.appendChild(new hPlan.FakeElement("div", { className: "wp", text: "Step navigation, Activity 2 of 3, Activity complete" }));
+  nav.appendChild(new hPlan.FakeElement("div", { className: "wp selected", text: "Step navigation, Activity 3 of 3, 0% complete" }));
+  nav.appendChild(
+    new hPlan.FakeElement("div", {
+      className: "wp",
+      text: "Step summary",
+      onclick() {
+        jumpedSummary = true;
+        nav.remove();
+        taskWrap.remove();
+        hPlan.doc.body.appendChild(new hPlan.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 1 Passed" }));
+        hPlan.doc.body.appendChild(new hPlan.FakeElement("ef-lesson-overview-step", { className: "is-passed", text: "Step 2 Passed" }));
+      }
+    })
+  );
+  hPlan.doc.body.appendChild(nav);
+  taskWrap.appendChild(new hPlan.FakeElement("button", { className: "item target", text: "women" }));
+  taskWrap.appendChild(new hPlan.FakeElement("button", { className: "item target", text: "men" }));
+  taskWrap.appendChild(new hPlan.FakeElement("button", { className: "item option", text: "cook", onclick() { sortAttempts++; } }));
+  taskWrap.appendChild(new hPlan.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true }));
+  hPlan.doc.body.appendChild(taskWrap);
+
+  const autoRes = await hPlan.dispatchCommand({ action: "autopilot", target: "4" });
+  assert.equal(autoRes.success, true);
+  assert.equal(jumpedSummary, true);
+  assert.equal(sortAttempts, 0);
+  assert.equal(autoRes.stoppedAt, "lesson_completed");
 });

@@ -257,6 +257,15 @@ func TestCommandTimeoutLongMacros(t *testing.T) {
 	if got := CommandTimeout(protocol.Command{Action: "speak"}); got != 120*time.Second {
 		t.Errorf("speak timeout should be 120s, got %v", got)
 	}
+	for _, action := range []string{"solve_gaps", "solve_sort", "solve_pair", "solve_order", "solve_sentence", "solve_auto"} {
+		if got := CommandTimeout(protocol.Command{Action: action}); got != 120*time.Second {
+			t.Errorf("%s timeout should be 120s, got %v", action, got)
+		}
+		batchSolver := protocol.Command{Action: "batch", Commands: []protocol.BatchSubCommand{{Action: action}, {Action: "next"}}}
+		if got := CommandTimeout(batchSolver); got != 120*time.Second {
+			t.Errorf("batch %s timeout should be 120s, got %v", action, got)
+		}
+	}
 	batch := protocol.Command{Action: "batch", Commands: []protocol.BatchSubCommand{{Action: "pick"}, {Action: "dialogue"}}}
 	if got := CommandTimeout(batch); got < 300*time.Second {
 		t.Errorf("batch with dialogue timeout too short: %v", got)
