@@ -42,6 +42,26 @@ func UnwrapMatchingQuotes(s string) string {
 	return strings.TrimSpace(inner)
 }
 
+func parseWaitMillis(tok string) (int, bool) {
+	s := strings.ToLower(strings.TrimSpace(tok))
+	if s == "" {
+		return 0, false
+	}
+	if strings.HasSuffix(s, "ms") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "ms"))
+		return n, err == nil && n >= 0
+	}
+	if strings.HasSuffix(s, "s") {
+		f, err := strconv.ParseFloat(strings.TrimSuffix(s, "s"), 64)
+		if err != nil || f < 0 {
+			return 0, false
+		}
+		return int(f * 1000), true
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil && n >= 0
+}
+
 // splitBatchSegments splits a batch command string on unquoted semicolons while
 // preserving semicolons inside quotes and ignoring English contractions/possessives.
 func splitBatchSegments(batchStr string) []string {
@@ -210,10 +230,14 @@ func ParseBatchString(batchStr string) []BatchSubCommand {
 		case "wait", "sleep":
 			if len(tokens) == 1 {
 				subs = append(subs, BatchSubCommand{Action: "sleep", DelayMs: 200, Target: "200", StopOnError: true})
-			} else if ms, err := strconv.Atoi(tokens[1]); err == nil && ms >= 0 {
-				subs = append(subs, BatchSubCommand{Action: "sleep", DelayMs: ms, Target: tokens[1], StopOnError: true})
+			} else if ms, ok := parseWaitMillis(tokens[1]); ok {
+				subs = append(subs, BatchSubCommand{Action: "sleep", DelayMs: ms, Target: strconv.Itoa(ms), StopOnError: true})
 			} else {
 				subs = append(subs, BatchSubCommand{Action: "wait", Target: rest, StopOnError: true})
+			}
+		case "eval", "query":
+			if rest != "" {
+				subs = append(subs, BatchSubCommand{Action: "eval", Target: rest, StopOnError: true})
 			}
 		case "solve":
 			strat := "auto"

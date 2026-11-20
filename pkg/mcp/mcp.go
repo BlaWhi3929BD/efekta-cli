@@ -180,7 +180,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "efekta_autopilot",
-			"description": "BEST FIRST CHOICE inside a lesson. Autonomously handles lesson overview, reading cards, videos, summaries, self-evaluation, regular multiple choice, essays, avatar dialogues, and optional pronunciation drills (skipped unless speak=true). Automatically stops with needsAgent=true and an agentHint on Progress Tests (progress_test_choice) and knowledge exercises (gaps, sort, pair, order_dialogue). After answering, call it again (or end a batch with '; auto').",
+			"description": "BEST FIRST CHOICE inside a lesson. Autonomously handles lesson overview, reading cards, videos, summaries, self-evaluation, regular multiple choice, selection gaps, categorize columns, matching pairs, order_dialogue, order_sentence, table word-family blanks, essays, avatar dialogues, early >50% step-summary skipping, and optional pronunciation drills (skipped unless speak=true). Automatically stops with needsAgent=true on Progress Tests (progress_test_choice). After answering, call it again (or end a batch with '; auto').",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{

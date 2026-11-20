@@ -409,7 +409,14 @@ func WritePID() error {
 }
 
 func RemovePID() {
-	_ = os.Remove(GetPIDFilePath())
+	pidPath := GetPIDFilePath()
+	data, err := os.ReadFile(pidPath)
+	if err == nil {
+		if pid, convErr := strconv.Atoi(strings.TrimSpace(string(data))); convErr == nil && pid != os.Getpid() {
+			return
+		}
+	}
+	_ = os.Remove(pidPath)
 }
 
 // NewMux returns the HTTP handler mux (used by both Run and unit tests)
@@ -472,27 +479,30 @@ func (s *Server) Run() error {
 	return nil
 }
 
-// CommandTimeout returns how long the daemon waits for the browser extension to answer a command.
-// Long-running macros (dialogue, autopilot) legitimately take minutes: every avatar turn plays video and speech.
-func CommandTimeout(cmd protocol.Command) time.Duration {
-	switch strings.ToLower(cmd.Action) {
+func actionBaseTimeout(action string) time.Duration {
+	switch strings.ToLower(action) {
 	case "dialogue", "avatar", "autopilot", "auto":
 		return 300 * time.Second
-	case "speak", "say", "skip_speaking":
+	case "speak", "say", "skip_speaking",
+		"solve_gaps", "solve_sort", "solve_pair", "solve_order", "solve_sentence", "solve_auto":
 		return 120 * time.Second
-	case "batch":
-		timeout := 60 * time.Second
-		for _, sub := range cmd.Commands {
-			switch strings.ToLower(sub.Action) {
-			case "dialogue", "avatar", "autopilot", "auto":
-				return 300 * time.Second
-			case "speak", "say", "skip_speaking":
-				timeout = 120 * time.Second
-			}
-		}
-		return timeout
 	case "skip", "solve_choice", "wait", "sleep", "next", "ff", "sort", "pair", "match", "gaps", "fill", "essay", "write", "sequence", "lesson", "unit":
 		return 60 * time.Second
 	}
 	return 25 * time.Second
+}
+
+// CommandTimeout returns how long the daemon waits for the browser extension to answer a command.
+// Long-running macros (dialogue, autopilot) legitimately take minutes: every avatar turn plays video and speech.
+func CommandTimeout(cmd protocol.Command) time.Duration {
+	if strings.EqualFold(cmd.Action, "batch") {
+		timeout := 60 * time.Second
+		for _, sub := range cmd.Commands {
+			if subTimeout := actionBaseTimeout(sub.Action); subTimeout > timeout {
+				timeout = subTimeout
+			}
+		}
+		return timeout
+	}
+	return actionBaseTimeout(cmd.Action)
 }

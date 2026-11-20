@@ -171,16 +171,19 @@ func ensureDaemon() error {
 		select {
 		case waitErr := <-waitCh:
 			if isDaemonRunning() {
-				waitForBrowserConnected(HealthURL, 2500*time.Millisecond, 150*time.Millisecond)
+				waitForBrowserConnected(HealthURL, 4000*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 			if tail := readDaemonLogTail(logPath); tail != "" {
+				if strings.Contains(tail, "address already in use") {
+					return fmt.Errorf("daemon exited during startup (%v): %s (another daemon may be hung without PID file; terminate it and retry) (log: %s)", waitErr, tail, logPath)
+				}
 				return fmt.Errorf("daemon exited during startup (%v): %s (log: %s)", waitErr, tail, logPath)
 			}
 			return fmt.Errorf("daemon exited during startup (%v) (log: %s)", waitErr, logPath)
 		case <-time.After(100 * time.Millisecond):
 			if isDaemonRunning() {
-				waitForBrowserConnected(HealthURL, 2500*time.Millisecond, 150*time.Millisecond)
+				waitForBrowserConnected(HealthURL, 4000*time.Millisecond, 150*time.Millisecond)
 				return nil
 			}
 		}
@@ -785,6 +788,10 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 	case "stop":
 		pidBytes, err := os.ReadFile(daemon.GetPIDFilePath())
 		if err != nil {
+			if isDaemonRunning() {
+				outputError(fmt.Errorf("daemon is running on port %s without a PID file (%s); stop the process manually", daemon.WsPort, daemon.GetPIDFilePath()), jsonOut)
+				os.Exit(1)
+			}
 			if jsonOut {
 				printJSON(map[string]interface{}{"success": true, "status": "already_stopped", "message": "Daemon PID file not found, may already be stopped."})
 			} else {

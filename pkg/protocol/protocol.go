@@ -83,13 +83,16 @@ type Command struct {
 
 // Response is received from Extension
 type Response struct {
-	ID      string      `json:"id,omitempty"`
-	Type    string      `json:"type,omitempty"` // hello, ping, pong (for control messages)
-	Success bool        `json:"success"`
-	Error   string      `json:"error,omitempty"`
-	Message string      `json:"message,omitempty"`
-	Data    interface{} `json:"data,omitempty"`
-	Results interface{} `json:"results,omitempty"`
+	ID         string      `json:"id,omitempty"`
+	Type       string      `json:"type,omitempty"` // hello, ping, pong (for control messages)
+	Success    bool        `json:"success"`
+	Error      string      `json:"error,omitempty"`
+	Message    string      `json:"message,omitempty"`
+	StoppedAt  string      `json:"stoppedAt,omitempty"`
+	NeedsAgent *bool       `json:"needsAgent,omitempty"`
+	Steps      []string    `json:"steps,omitempty"`
+	Data       interface{} `json:"data,omitempty"`
+	Results    interface{} `json:"results,omitempty"`
 
 	// Extension status metadata on hello/ping
 	HasEfektaTab bool   `json:"hasEfektaTab,omitempty"`
