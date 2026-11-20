@@ -6,17 +6,46 @@
   const EVT_IN = "efekta:in";
   const EVT_OUT = "efekta:out";
 
-  // Fallback injection in case browser didn't support world: "MAIN" in manifest
-  function injectPageScriptFallback() {
+  function sanitizeUrl(rawUrl) {
+    if (!rawUrl) return "";
     try {
-      const script = document.createElement("script");
-      script.src = chrome.runtime.getURL("injected.js");
-      script.onload = () => script.remove();
-      script.onerror = () => script.remove();
-      (document.head || document.documentElement).appendChild(script);
-    } catch (_) {}
+      const u = new URL(String(rawUrl));
+      for (const key of Array.from(u.searchParams.keys())) {
+        if (/^(token|access_token|id_token|jwt|code|auth|session|sig|signature)$/i.test(key)) {
+          u.searchParams.set(key, "[REDACTED]");
+        }
+      }
+      return u.toString();
+    } catch (_) {
+      return String(rawUrl).split("?")[0];
+    }
   }
-  injectPageScriptFallback();
+
+  function isStudyPlayerFrame() {
+    try {
+      const host = (window.location && window.location.hostname ? window.location.hostname : "").toLowerCase();
+      return host === "study.better.efekta.com" || host.endsWith(".study.better.efekta.com");
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Fallback injection ONLY on study player frames, and ONLY if manifest world: "MAIN" didn't already load injected.js
+  function injectPageScriptFallback() {
+    if (!isStudyPlayerFrame()) return;
+    setTimeout(() => {
+      callVoiceBridge({ type: "hello" }, 300).then((res) => {
+        if (res && res.ok) return;
+        try {
+          const script = document.createElement("script");
+          script.src = chrome.runtime.getURL("injected.js");
+          script.onload = () => script.remove();
+          script.onerror = () => script.remove();
+          (document.head || document.documentElement).appendChild(script);
+        } catch (_) {}
+      });
+    }, 150);
+  }
 
   function getClassName(el) {
     if (!el) return "";
@@ -30,12 +59,9 @@
     const isTop = window === window.top;
     chrome.runtime.sendMessage({
       type: "FRAME_REGISTER",
-      url: window.location.href,
+      url: sanitizeUrl(window.location.href),
       isTop,
-      isLessonPlayer:
-        !isTop &&
-        (window.location.href.includes("lesson-player") ||
-          window.location.href.includes("study.better.efekta.com"))
+      isLessonPlayer: !isTop && isStudyPlayerFrame()
     });
   } catch (_) {}
 
@@ -92,6 +118,7 @@
       }
     });
   }
+  injectPageScriptFallback();
 
   function isVisible(el) {
     if (!el || !el.getBoundingClientRect) return false;
@@ -323,14 +350,19 @@
       if (isCdkSortItem(sourceEl) && isCdkSortItem(targetEl)) {
         const srcId = sourceEl.getAttribute("data-efekta-id") || "";
         const dstId = targetEl.getAttribute("data-efekta-id") || "";
-        const r = await callVoiceBridge({
-          type: "cdkSort",
-          srcId,
-          dstId
-        });
-        if (r && r.ok && r.result) {
-          await sleep(60);
-          return true;
+        if (srcId && dstId) {
+          const r = await callVoiceBridge(
+            {
+              type: "cdkSort",
+              srcId,
+              dstId
+            },
+            500
+          );
+          if (r && r.ok && r.result) {
+            await sleep(60);
+            return true;
+          }
         }
       }
     } catch (_) {}
@@ -418,8 +450,10 @@
       hoverEl.dispatchEvent(new MouseEvent("mousemove", moveInit));
       doc.dispatchEvent(new PointerEvent("pointermove", moveInit));
       doc.dispatchEvent(new MouseEvent("mousemove", moveInit));
-      win.dispatchEvent(new PointerEvent("pointermove", moveInit));
-      win.dispatchEvent(new MouseEvent("mousemove", moveInit));
+      if (win && typeof win.dispatchEvent === "function") {
+        win.dispatchEvent(new PointerEvent("pointermove", moveInit));
+        win.dispatchEvent(new MouseEvent("mousemove", moveInit));
+      }
 
       if (dataTransfer) {
         if (i === steps - 1) {
@@ -909,15 +943,17 @@
   // Brute-force / trial-and-error solver is strictly forbidden on progress tests to protect the score.
   function isProgressTest(docs) {
     docs = docs || getAllDocs();
+    const curPath = (window.location && window.location.pathname) || "";
+    if (/\/(test-view|progress-test|final-test|test-player)\b/i.test(curPath)) {
+      return true;
+    }
     for (const doc of docs) {
       if (
-        doc.querySelector("ef-test-player, ef-test-header, ef-assessment-test, [class*='test-header'], [data-id*='test-player']") ||
+        doc.querySelector(
+          "ef-test-player, ef-test-header, ef-assessment-test, [class*='test-header'], [data-id*='test-player'], [data-qa*='progress-test'], [data-qa*='final-test']"
+        ) ||
         /progress\s*test|final\s*test|assessment\s*test/i.test(doc.title || "")
       ) {
-        return true;
-      }
-      // Test-specific not-assessed option buttons in Efekta Catalyst
-      if (doc.querySelector(".option-button.not-assessed, button.not-assessed")) {
         return true;
       }
       // Check headers and breadcrumbs
@@ -1094,6 +1130,28 @@
       try {
         if (el.matches && el.matches(containerBlacklistSelector)) continue;
       } catch (_) {}
+
+      // Skip wrapper custom elements that contain a real interactive child button/input (avoids duplicate opt-1/opt-2 & slot/input)
+      if (
+        tag === "ef-multiple-choice-tap-task-response-option" &&
+        el.querySelector &&
+        el.querySelector("button, [role='radio'], [role='checkbox']")
+      ) {
+        continue;
+      }
+      if (
+        tag === "ef-gapfill-item" &&
+        el.querySelector &&
+        el.querySelector("input:not([type='hidden']), textarea, [contenteditable='true']")
+      ) {
+        continue;
+      }
+      if (
+        cls.includes("more-options") ||
+        cls.includes("column-header")
+      ) {
+        continue;
+      }
 
       // Skip static non-button children inside end-of-activity summary or instructions
       if (
@@ -1406,7 +1464,15 @@
       });
     }
 
-    // Extract clean task prompt / instructions
+    // Extract clean task prompt / instructions (filtering out persistent Catalyst chrome noise)
+    const uiChromeNoiseRegex =
+      /^(view activity instructions|debugging details|okay,?\s*got it|close lesson|user|details)$/i;
+    const stripLeadingNoise = (str) =>
+      String(str || "")
+        .replace(/^view activity instructions\s*/i, "")
+        .replace(/\s*okay,?\s*got it$/i, "")
+        .trim();
+
     const promptCandidates = [];
     for (const doc of docs) {
       promptCandidates.push(
@@ -1416,8 +1482,8 @@
           )
         )
           .filter(isVisible)
-          .map((e) => cleanText(e))
-          .filter((t) => t.length > 2 && t.length < 300)
+          .map((e) => stripLeadingNoise(cleanText(e)))
+          .filter((t) => t.length > 2 && t.length < 300 && !uiChromeNoiseRegex.test(t))
       );
     }
     const prompt = Array.from(new Set(promptCandidates)).slice(0, 3).join(" | ");
@@ -1425,34 +1491,12 @@
     // Extract speaking practice phrase if present
     const speakingInfo = extractSpeakingInfo(docs);
 
-    // Extract context sentences (with inline [input-N] / [slot-N] placeholders, without hidden sizing text!)
-    const contextNodes = [];
-    for (const doc of docs) {
-      contextNodes.push(
-        ...Array.from(
-          doc.querySelectorAll(
-            "p, [class*='sentence'], [class*='passage'], [class*='dialogue'], [class*='transcript'], [class*='phrase'], [class*='statement'], [class*='question-text'], .gap-sentence"
-          )
-        ).filter(isVisible)
-      );
-    }
-
-    const contextLines = [];
-    const seenContext = new Set();
-
-    if (speakingInfo.targetPhrase) {
-      seenContext.add(speakingInfo.targetPhrase);
-      contextLines.push(speakingInfo.targetPhrase);
-      if (speakingInfo.progressText) {
-        contextLines.push(`Progress: ${speakingInfo.progressText}`);
-      }
-    }
-
-    for (const node of contextNodes) {
+    // Helper to extract text with inline [input-N] / [slot-N] placeholders while skipping hidden sizing spans
+    const extractTextWithBlanks = (rootNode) => {
       let textWithBlanks = "";
-      const nodeDoc = node.ownerDocument || document;
+      const nodeDoc = rootNode.ownerDocument || document;
       const walker = nodeDoc.createTreeWalker(
-        node,
+        rootNode,
         NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
         {
           acceptNode(n) {
@@ -1511,8 +1555,69 @@
         }
         cur = walker.nextNode();
       }
-      const cleaned = (textWithBlanks || cleanText(node)).trim().replace(/\s+/g, " ");
-      if (cleaned.length > 2 && cleaned.length < 500 && !seenContext.has(cleaned)) {
+      return (textWithBlanks || cleanText(rootNode)).trim().replace(/\s+/g, " ");
+    };
+
+    // Extract context sentences, reading bullet lists, and table rows (with inline [input-N] / [slot-N] placeholders!)
+    const contextNodes = [];
+    for (const doc of docs) {
+      contextNodes.push(
+        ...Array.from(
+          doc.querySelectorAll(
+            "tr, ef-stimulus li, p, ef-gapfill-task, ef-selection-gap-task, .gapfill-task, [class*='sentence'], [class*='passage'], [class*='dialogue'], [class*='transcript'], [class*='phrase'], [class*='statement'], [class*='question-text'], .gap-sentence"
+          )
+        ).filter(isVisible)
+      );
+    }
+
+    const contextLines = [];
+    const seenContext = new Set();
+
+    if (speakingInfo.targetPhrase) {
+      seenContext.add(speakingInfo.targetPhrase);
+      contextLines.push(speakingInfo.targetPhrase);
+      if (speakingInfo.progressText) {
+        contextLines.push(`Progress: ${speakingInfo.progressText}`);
+      }
+    }
+
+    for (const node of contextNodes) {
+      const nTag = node.tagName ? node.tagName.toLowerCase() : "";
+      // Skip <p> inside <tr> or <li> if its parent row/item is already captured cleanly
+      if (nTag === "p" && node.closest && node.closest("tr, ef-stimulus li")) {
+        continue;
+      }
+      // Skip outer ef-gapfill-task / ef-selection-gap-task wrapper if it already contains inner <p> or <tr>
+      if (
+        (nTag === "ef-gapfill-task" ||
+          nTag === "ef-selection-gap-task" ||
+          getClassName(node).toLowerCase().includes("gapfill-task")) &&
+        node.querySelector &&
+        node.querySelector("p, tr, ef-stimulus li")
+      ) {
+        continue;
+      }
+      let cleaned = "";
+      if (nTag === "tr") {
+        const cells = Array.from(node.querySelectorAll("th, td")).filter(isVisible);
+        if (cells.length > 0) {
+          cleaned = cells
+            .map((c) => extractTextWithBlanks(c))
+            .filter(Boolean)
+            .join(" | ");
+        } else {
+          cleaned = extractTextWithBlanks(node);
+        }
+      } else {
+        cleaned = extractTextWithBlanks(node);
+      }
+      cleaned = stripLeadingNoise(cleaned);
+      if (
+        cleaned.length > 2 &&
+        cleaned.length < 1600 &&
+        !uiChromeNoiseRegex.test(cleaned) &&
+        !seenContext.has(cleaned)
+      ) {
         seenContext.add(cleaned);
         contextLines.push(cleaned);
       }
@@ -1546,7 +1651,8 @@
 
     const videoStatus = getMediaStatus();
 
-    const choiceEls = elements.filter((e) => e.type === "choice" && !e.disabled);
+    const allChoiceEls = elements.filter((e) => e.type === "choice");
+    const choiceEls = allChoiceEls.filter((e) => !e.disabled);
     const dragEls = elements.filter((e) => e.type === "draggable" && !e.disabled);
     const slotEls = elements.filter((e) => e.type === "drop_target");
     const inputEls = elements.filter((e) => e.type === "input");
@@ -1590,7 +1696,15 @@
       return summaryEl && isVisible(summaryEl);
     });
 
-    if (isActivitySummary) {
+    const isHumanVerification = docs.some((doc) =>
+      doc.querySelector("#cf-turnstile, script[src*='challenges.cloudflare.com/turnstile'], iframe[src*='challenges.cloudflare.com']")
+    );
+
+    if (isHumanVerification) {
+      exerciseType = "human_verification_required";
+      actionTemplate = "";
+      summary = "Human verification (Cloudflare Turnstile) is displayed in the browser. Complete it manually in the browser window.";
+    } else if (isActivitySummary) {
       exerciseType = "passive_screen";
       actionTemplate = `efekta next --json -c`;
       summary = `End of activity summary screen (${nextBtn ? nextBtn.id : "unlocked"}). Run 'efekta next --json -c' to continue.`;
@@ -1685,20 +1799,45 @@
           summary = `Click/order ${dragEls.length} tokens in sentence order using 'pick item-X,item-Y; next'.`;
         }
       }
-    } else if (choiceEls.length >= 2) {
+    } else if (choiceEls.length >= 2 || (allChoiceEls.length >= 2 && choiceEls.length === 1)) {
       if (progressTest) {
         exerciseType = "progress_test_choice";
         actionTemplate = `efekta batch "pick opt-X; next" --json -c`;
         summary = `PROGRESS TEST: Single-shot formal assessment. Trial-and-error ('solve choice') is disabled to protect your certificate score. Derive the linguistically correct choice and submit with 'pick opt-X; next'.`;
       } else {
         exerciseType = "multiple_choice";
-        actionTemplate = `efekta batch "pick opt-1; next" --json -c`;
+        actionTemplate = `efekta batch "pick ${choiceEls[0] ? choiceEls[0].id : "opt-1"}; next" --json -c`;
         summary = `Pick the right option(s) from ${choiceEls.length} choices and auto-advance with '; next'.`;
       }
     } else if (stageEls.length >= 2 && !nextBtn) {
-      exerciseType = "lesson_overview";
-      actionTemplate = `efekta next --json -c`;
-      summary = `Lesson overview screen (${stageEls.length} steps). Run 'efekta next --json -c' to enter the next incomplete step.`;
+      const overviewSteps = [];
+      for (const d of docs) {
+        overviewSteps.push(
+          ...Array.from(d.querySelectorAll("ef-lesson-overview-step")).filter(isVisible)
+        );
+      }
+      const isStepPassed = (s) => {
+        const txt = (s.innerText || s.textContent || "").toLowerCase();
+        const cls = getClassName(s).toLowerCase();
+        return (
+          cls.includes("completed") ||
+          cls.includes("passed") ||
+          txt.includes("completed") ||
+          /\bpassed\b/.test(txt) ||
+          !!s.querySelector(".completed, .passed, .is-passed, [class*='is-passed'], [class*='check']")
+        );
+      };
+      const allStepsPassed =
+        overviewSteps.length > 0 && overviewSteps.every(isStepPassed);
+      if (allStepsPassed) {
+        exerciseType = "lesson_completed";
+        actionTemplate = `efekta lesson next --json -c`;
+        summary = `Lesson completed (${overviewSteps.length}/${overviewSteps.length} steps passed). Run 'efekta lesson next --json -c' to advance to the next lesson.`;
+      } else {
+        exerciseType = "lesson_overview";
+        actionTemplate = `efekta next --json -c`;
+        summary = `Lesson overview screen (${stageEls.length} steps). Run 'efekta next --json -c' to enter the next incomplete step.`;
+      }
     } else if (nextBtn) {
       exerciseType = "passive_screen";
       actionTemplate = `efekta next --json -c`;
@@ -1709,14 +1848,45 @@
       summary = `Video stage. Run 'efekta next --json -c' or 'efekta wait video-end'.`;
     }
 
+    const actEls = elements.filter((e) => e.type === "activity_nav");
+    const activities = actEls.map((a) => {
+      const txt = a.text || "";
+      const pctMatch = txt.match(/(\d+%)/);
+      const label = pctMatch
+        ? pctMatch[1]
+        : /\b(completed|complete|passed)\b/i.test(txt)
+        ? "100%"
+        : /summary/i.test(txt)
+        ? "summary"
+        : txt.slice(0, 24);
+      return `${a.id}${a.selected ? "*" : ""}: ${label}`;
+    });
+
+    const formatHintItem = (i) => {
+      if (exerciseType === "order_dialogue") {
+        const domEl = elementRegistry.get(i.id);
+        if (domEl && domEl.tagName && domEl.tagName.toLowerCase() === "ef-sequencing-sort-column-item") {
+          const isUnlocked = !!domEl.querySelector(".is-unassessed");
+          const isLocked =
+            !isUnlocked &&
+            (!!domEl.querySelector(".is-correct, .correct") ||
+              getClassName(domEl).toLowerCase().includes("correct") ||
+              docs.some((d) => d.querySelector("ef-sequencing-sort-column-item .is-unassessed")));
+          if (isLocked) return `${i.id}: [✓] ${i.text}`;
+        }
+      }
+      return `${i.id}: ${i.text}`;
+    };
+
     const agentHint = {
       exerciseType,
       actionTemplate,
       summary,
       slots: slotEls.map((s) => `${s.id}: ${s.text || "___"}`),
-      items: dragEls.map((i) => `${i.id}: ${i.text}`),
+      items: dragEls.map(formatHintItem),
       options: drawerChoiceStrings,
-      inputs: inputEls.map((inp) => `${inp.id}: ${inp.text || "___"}`)
+      inputs: inputEls.map((inp) => `${inp.id}: ${inp.text || "___"}`),
+      ...(activities.length > 0 ? { activities } : {})
     };
 
     let canProceed = !!nextBtn;
@@ -1753,12 +1923,12 @@
     }
 
     return {
-      url: window.location.href,
+      url: sanitizeUrl(window.location.href),
       title: document.title,
       exerciseType,
       isProgressTest: progressTest,
       prompt,
-      contextText: contextLines.slice(0, 12),
+      contextText: contextLines.slice(0, 16),
       feedback,
       agentHint,
       video: videoStatus,
@@ -1769,28 +1939,131 @@
     };
   }
 
-  // If on selection_gaps and options list is still empty, auto-peek slot-1 so the word bank is visible immediately!
+  let lastOpenedGapEl = null;
+
+  function getVisibleDrawerOptionNodes(docs) {
+    const list = [];
+    for (const doc of docs || getAllDocs()) {
+      list.push(
+        ...Array.from(doc.querySelectorAll("div.drawer-option, .drawer-option")).filter(isVisible)
+      );
+    }
+    return list;
+  }
+
+  // Auto-peek ALL unfilled selection-gap drawers so agentHint.options shows per-slot choices upfront,
+  // then close the drawer cleanly so executeGaps never double-toggles slot-1 closed!
   async function autoPeekSelectionGapOptions(st) {
     if (!st || st.exerciseType !== "selection_gaps") return st;
-    if (st.agentHint && st.agentHint.options && st.agentHint.options.length > 0) return st;
 
     const docs = getAllDocs();
+    const gapButtons = [];
     for (const doc of docs) {
-      const firstGap = doc.querySelector("button.selection-gap-button");
-      if (firstGap && isVisible(firstGap)) {
-        await simulateClick(firstGap);
-        const start = Date.now();
-        while (Date.now() - start < 450) {
+      gapButtons.push(
+        ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(isVisible)
+      );
+    }
+    if (gapButtons.length === 0) return st;
+
+    // If options already have per-slot annotations ("slot-1: ..."), nothing more to peek
+    if (
+      st.agentHint &&
+      Array.isArray(st.agentHint.options) &&
+      st.agentHint.options.some((o) => /^slot-\d+:/i.test(String(o)))
+    ) {
+      return st;
+    }
+
+    const perSlotLists = [];
+    let lastClickedGap = null;
+
+    for (let idx = 0; idx < Math.min(gapButtons.length, 10); idx++) {
+      const gapBtn = gapButtons[idx];
+      if (!gapBtn || !gapBtn.isConnected || !isVisible(gapBtn)) continue;
+
+      const prevNodes = new Set(getVisibleDrawerOptionNodes(docs));
+      const prevKey = Array.from(prevNodes)
+        .map((o) => cleanText(o))
+        .filter(Boolean)
+        .join("|");
+
+      await simulateClick(gapBtn);
+      lastClickedGap = gapBtn;
+      lastOpenedGapEl = gapBtn;
+
+      let opts = [];
+      const start = Date.now();
+      while (Date.now() - start < 420) {
+        await sleep(35);
+        opts = getVisibleDrawerOptionNodes(docs);
+        if (opts.length > 0) {
+          const curKey = opts
+            .map((o) => cleanText(o))
+            .filter(Boolean)
+            .join("|");
+          const hasNewNode = opts.some((o) => !prevNodes.has(o));
+          if (prevNodes.size === 0 || hasNewNode || curKey !== prevKey || Date.now() - start >= 180) {
+            break;
+          }
+        }
+      }
+
+      // If clicking an already-open gap closed its drawer, click once more to read its options
+      if (opts.length === 0) {
+        await simulateClick(gapBtn);
+        const retryStart = Date.now();
+        while (Date.now() - retryStart < 380) {
           await sleep(35);
-          const opts = Array.from(
-            doc.querySelectorAll("div.drawer-option, .drawer-option")
-          ).filter(isVisible);
+          opts = getVisibleDrawerOptionNodes(docs);
           if (opts.length > 0) break;
         }
-        return inspectState();
+      }
+
+      const texts = Array.from(
+        new Set(
+          opts
+            .filter((o) => !o.classList.contains("disabled"))
+            .map((o) => cleanText(o))
+            .filter(Boolean)
+        )
+      );
+      const fallbackTexts =
+        texts.length > 0
+          ? texts
+          : Array.from(new Set(opts.map((o) => cleanText(o)).filter(Boolean)));
+      const slotId = gapBtn.getAttribute("data-efekta-id") || `slot-${idx + 1}`;
+      if (fallbackTexts.length > 0) {
+        perSlotLists.push({ slotId, options: fallbackTexts });
       }
     }
-    return st;
+
+    // Close the last open drawer so executeGaps starts from a clean, deterministic state
+    if (lastClickedGap && lastClickedGap.isConnected && getVisibleDrawerOptionNodes(docs).length > 0) {
+      await simulateClick(lastClickedGap);
+      const closeStart = Date.now();
+      while (Date.now() - closeStart < 240) {
+        await sleep(30);
+        if (getVisibleDrawerOptionNodes(docs).length === 0) {
+          lastOpenedGapEl = null;
+          break;
+        }
+      }
+    }
+
+    const updated = inspectState();
+    if (perSlotLists.length > 0 && updated.agentHint) {
+      const uniqueSets = new Set(perSlotLists.map((p) => p.options.join("|")));
+      if (perSlotLists.length > 1 && uniqueSets.size > 1) {
+        updated.agentHint.options = perSlotLists.map(
+          (p) => `${p.slotId}: ${p.options.join(" | ")}`
+        );
+      } else {
+        updated.agentHint.options = perSlotLists[0].options.map(
+          (t, i) => `opt-${i + 1}: ${t}`
+        );
+      }
+    }
+    return updated;
   }
 
   // Wait for a condition ("video-end", "next", "unlocked", or duration in ms)
@@ -2116,6 +2389,27 @@
       if (attrId) slotDomMap.set(attrId, btn);
     });
 
+    const initialInputs = [];
+    if (initialGapButtons.length === 0) {
+      const initSt = inspectState();
+      const initInputEls = initSt.elements.filter((e) => e.type === "input");
+      for (const meta of initInputEls) {
+        const domEl = resolveElement(meta.id);
+        if (domEl) initialInputs.push({ id: meta.id, el: domEl });
+      }
+    }
+    const inputDomMap = new Map();
+    initialInputs.forEach((entry, idx) => {
+      inputDomMap.set(`input-${idx + 1}`, entry.el);
+      inputDomMap.set(entry.id, entry.el);
+    });
+
+    const isGapTextUnfilled = (btn) => {
+      const t = cleanText(btn).toLowerCase();
+      const cls = getClassName(btn).toLowerCase();
+      return !t || /^blank(\s+\d+\s+of\s+\d+)?$/i.test(t) || /^[_.\s-]+$/.test(t) || cls.includes("empty");
+    };
+
     const getVisibleDrawerOptions = () => {
       const list = [];
       for (const doc of docs) {
@@ -2126,6 +2420,26 @@
         );
       }
       return list;
+    };
+
+    const findTypingStatusButton = (inputDom) => {
+      const scope =
+        inputDom && inputDom.closest
+          ? inputDom.closest("ef-gapfill-item, td, tr, .gapfill-item, .gap-item")
+          : null;
+      if (scope) {
+        const localBtn = Array.from(
+          scope.querySelectorAll("button.typing-status, .typing-status")
+        ).find(isVisible);
+        if (localBtn) return localBtn;
+      }
+      for (const doc of getAllDocs()) {
+        const globalBtn = Array.from(
+          doc.querySelectorAll("button.typing-status, .typing-status")
+        ).find(isVisible);
+        if (globalBtn) return globalBtn;
+      }
+      return null;
     };
 
     for (let i = 0; i < entries.length; i++) {
@@ -2165,42 +2479,55 @@
               )
             );
           }
-          gapBtn =
-            currentButtons.find((b) => {
-              const t = cleanText(b).toLowerCase();
-              const cls = getClassName(b).toLowerCase();
-              return (
-                !t ||
-                t.includes("blank") ||
-                /^[_.\s-]+$/.test(t) ||
-                cls.includes("empty") ||
-                !cls.includes("filled")
-              );
-            }) || currentButtons[0];
+          gapBtn = currentButtons.find(isGapTextUnfilled) || currentButtons[0];
         }
 
         let drawerOpts = getVisibleDrawerOptions();
         const gapCls = getClassName(gapBtn).toLowerCase();
         const isGapAlreadySelected =
-          gapBtn &&
+          !!gapBtn &&
           drawerOpts.length > 0 &&
-          (gapCls.includes("selected") ||
+          (gapBtn === lastOpenedGapEl ||
+            gapCls.includes("selected") ||
             gapCls.includes("active") ||
-            gapBtn.getAttribute("aria-expanded") === "true");
+            gapCls.includes("open") ||
+            gapBtn.getAttribute("aria-expanded") === "true" ||
+            !!(gapBtn.closest && gapBtn.closest(".selected, .active, .open")));
 
         if (!isGapAlreadySelected && gapBtn) {
+          // Wait briefly if a previous slot's drawer is still animating out so we never read stale options!
+          if (drawerOpts.length > 0 && lastOpenedGapEl && lastOpenedGapEl !== gapBtn) {
+            const staleStart = Date.now();
+            while (Date.now() - staleStart < 350) {
+              await sleep(30);
+              drawerOpts = getVisibleDrawerOptions();
+              if (drawerOpts.length === 0) break;
+            }
+          }
+
+          const prevNodes = new Set(drawerOpts);
+          const prevKey = drawerOpts.map((o) => cleanText(o)).filter(Boolean).join("|");
           await simulateClick(gapBtn);
+          lastOpenedGapEl = gapBtn;
+
           const waitStart = Date.now();
-          while (Date.now() - waitStart < 650) {
+          while (Date.now() - waitStart < 750) {
             await sleep(35);
             drawerOpts = getVisibleDrawerOptions();
-            if (drawerOpts.length > 0) break;
+            if (drawerOpts.length > 0) {
+              const hasNewNode = drawerOpts.some((o) => !prevNodes.has(o));
+              const curKey = drawerOpts.map((o) => cleanText(o)).filter(Boolean).join("|");
+              if (prevNodes.size === 0 || hasNewNode || curKey !== prevKey || Date.now() - waitStart >= 240) {
+                break;
+              }
+            }
           }
         }
 
-        // If drawer still didn't open (e.g. first click closed a different drawer), click gapBtn once more
+        // If drawer still didn't open (e.g. first click closed an open drawer), click gapBtn once more
         if (drawerOpts.length === 0 && gapBtn) {
           await simulateClick(gapBtn);
+          lastOpenedGapEl = gapBtn;
           const waitStart = Date.now();
           while (Date.now() - waitStart < 650) {
             await sleep(35);
@@ -2230,37 +2557,93 @@
 
         await simulateClick(matchOpt);
         await sleep(80);
-        if (matchOpt.classList.contains("deselected")) {
+        if (matchOpt.isConnected && matchOpt.classList.contains("deselected")) {
           await simulateClick(matchOpt);
           await sleep(80);
         }
         filled.push(word);
 
-        // Wait up to 400ms for drawer selection to commit before moving to next gap
+        // Wait up to 600ms for drawer selection to commit and close cleanly before moving to next gap
         const commitStart = Date.now();
-        while (Date.now() - commitStart < 400) {
+        while (Date.now() - commitStart < 600) {
           await sleep(40);
-          if (!matchOpt.isConnected || !isVisible(matchOpt)) break;
+          if (
+            !matchOpt.isConnected ||
+            !isVisible(matchOpt) ||
+            (gapBtn && !gapBtn.isConnected) ||
+            getVisibleDrawerOptions().length === 0
+          ) {
+            break;
+          }
         }
-        await sleep(120);
+        lastOpenedGapEl = null;
+        await sleep(100);
         continue;
       }
 
-      // Case B: Standard <input> / <textarea> / [contenteditable] blanks
-      const st = inspectState();
-      const inputEls = st.elements.filter((e) => e.type === "input");
-      const targetId = targetKey || (inputEls[i] ? inputEls[i].id : "");
-      const inputDom = targetId ? resolveElement(targetId) : null;
+      // Case B: Standard <input> / <textarea> / [contenteditable] blanks (including Catalyst ef-writing-gap-task)
+      let inputDom =
+        (targetKey && inputDomMap.get(targetKey)) ||
+        (initialInputs[i] && initialInputs[i].el) ||
+        null;
+      let targetId = targetKey || (initialInputs[i] && initialInputs[i].id) || `input-${i + 1}`;
+
+      if (!inputDom || !inputDom.isConnected || !isVisible(inputDom)) {
+        const st = inspectState();
+        const inputEls = st.elements.filter((e) => e.type === "input");
+        const fallbackMeta =
+          (targetKey && inputEls.find((e) => e.id === targetKey)) ||
+          inputEls.find((e) => !e.text || e.text === "___") ||
+          inputEls[0] ||
+          null;
+        targetId = fallbackMeta ? fallbackMeta.id : targetId;
+        inputDom = fallbackMeta ? resolveElement(fallbackMeta.id) : null;
+      }
+
       if (!inputDom) {
+        const stNow = inspectState();
+        const avail = stNow.elements.filter((e) => e.type === "input").length;
         return {
           success: false,
-          error: `No gap button or input element found for "${word}" (index ${i + 1}, inputs available: ${inputEls.length})`,
+          error: `No gap button or input element found for "${word}" (index ${i + 1}, inputs available: ${avail})`,
           filled
         };
       }
       await simulateType(inputDom, word, 6);
+
+      // Catalyst ef-writing-gap-task requires clicking button.typing-status to commit each typed gap!
+      // Poll up to 420ms for button.typing-status to mount, then click and verify commit.
+      let typingSubmitBtn = null;
+      const findBtnStart = Date.now();
+      while (Date.now() - findBtnStart < 420) {
+        typingSubmitBtn = findTypingStatusButton(inputDom);
+        if (typingSubmitBtn) break;
+        await sleep(45);
+      }
+      if (typingSubmitBtn) {
+        for (let attempt = 0; attempt < 2; attempt++) {
+          await simulateClick(typingSubmitBtn);
+          const commitStart = Date.now();
+          let committed = false;
+          while (Date.now() - commitStart < 420) {
+            await sleep(40);
+            if (
+              !inputDom.isConnected ||
+              !isVisible(inputDom) ||
+              !typingSubmitBtn.isConnected ||
+              !isVisible(typingSubmitBtn)
+            ) {
+              committed = true;
+              break;
+            }
+          }
+          if (committed) break;
+          typingSubmitBtn = findTypingStatusButton(inputDom);
+          if (!typingSubmitBtn) break;
+        }
+      }
       filled.push(`${targetId}=${word}`);
-      await sleep(180);
+      await sleep(140);
     }
 
     // Post-fill verification: ensure all gap buttons are committed and next-1 unlocks cleanly
@@ -2278,26 +2661,21 @@
       }
 
       let stNow = inspectState();
-      // Never blindly guess opts[0] into unfilled gaps on a Progress Test!
+      // On regular lessons (never Progress Tests!), if any selection gap remained unfilled (e.g. two words were swapped),
+      // automatically finish the remaining gaps using the autonomous selection-gap solver!
       if (!stNow.canProceed && !stNow.isProgressTest) {
-        for (const doc of docsCurrent) {
-          const gaps = Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(isVisible);
-          const unfilled = gaps.find((b) => {
-            const t = cleanText(b).toLowerCase();
-            const cls = getClassName(b).toLowerCase();
-            return !t || t.includes("blank") || /^[_.\s-]+$/.test(t) || cls.includes("empty") || !cls.includes("filled");
-          });
-          if (unfilled) {
-            await simulateClick(unfilled);
-            await sleep(150);
-            const opts = getVisibleDrawerOptions().filter((o) => !o.classList.contains("disabled"));
-            if (opts.length > 0) {
-              await simulateClick(opts[0]);
-              await sleep(150);
-            }
-          }
+        const subSolve = await solveSelectionGaps();
+        if (subSolve && Array.isArray(subSolve.filled) && subSolve.filled.length > 0) {
+          filled.push(...subSolve.filled);
         }
       }
+    }
+
+    // Wait briefly for Next/Check button to unlock after committing all gaps
+    const unlockStart = Date.now();
+    while (Date.now() - unlockStart < 600) {
+      if (inspectState().canProceed) break;
+      await sleep(60);
     }
 
     return {
@@ -2353,6 +2731,56 @@
     return false;
   }
 
+  // Fast-forward passive video/audio cleanly under Firefox & Chrome autoplay policies by muting before play(),
+  // with direct duration + timeupdate/ended fallback if playback is still blocked.
+  async function fastForwardPassiveMedia(docs) {
+    docs = docs || getAllDocs();
+    let count = 0;
+    for (const doc of docs) {
+      for (const v of Array.from(doc.querySelectorAll("video, audio"))) {
+        try {
+          if (isFinite(v.duration) && v.duration > 0 && !v.ended) {
+            v.muted = true;
+            v.defaultMuted = true;
+            v.currentTime = Math.max(0, v.duration - 0.15);
+            try {
+              const p = v.play();
+              if (p && typeof p.catch === "function") p.catch(() => {});
+            } catch (_) {}
+            count++;
+          }
+        } catch (_) {}
+      }
+    }
+    if (count === 0) return 0;
+
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 900) {
+      await sleep(80);
+      const allEnded = docs.every((doc) =>
+        Array.from(doc.querySelectorAll("video, audio")).every(
+          (v) => !isFinite(v.duration) || v.duration <= 0 || v.ended
+        )
+      );
+      if (allEnded) break;
+    }
+
+    // Fallback if browser still blocked playback: snap to duration and emit timeupdate + ended
+    for (const doc of docs) {
+      for (const v of Array.from(doc.querySelectorAll("video, audio"))) {
+        try {
+          if (isFinite(v.duration) && v.duration > 0 && !v.ended) {
+            v.currentTime = v.duration;
+            v.dispatchEvent(new Event("timeupdate"));
+            v.dispatchEvent(new Event("ended"));
+          }
+        } catch (_) {}
+      }
+    }
+    await sleep(180);
+    return count;
+  }
+
   // Turbo Action 5: Auto-Fast-Forward ("next" / "ff")
   // Advances from current screen and automatically glides through consecutive passive screens
   // (reading cards, "Correct answers" review, self-evaluation, AI feedback, "Step passed!" summary, Lesson Overview)
@@ -2364,6 +2792,24 @@
       await dismissOverlaysIfPresent();
       await waitUntilUnlocked(1500);
       let st = inspectState();
+
+      if (st.exerciseType === "lesson_completed") {
+        return {
+          success: true,
+          message: "Lesson completed (all steps passed). Run 'efekta lesson next --json -c' to move to the next lesson.",
+          hops,
+          autoReadNotes
+        };
+      }
+
+      if (st.exerciseType === "human_verification_required") {
+        return {
+          success: false,
+          error: "Human verification (Cloudflare Turnstile) is displayed in the browser. Complete it manually.",
+          hops,
+          autoReadNotes
+        };
+      }
 
       // Avatar dialogue: NEVER fast-forward (seeking its video skips every question). Hand over to `dialogue`.
       if (isAvatarContext(st) && !isSummaryVisible() && !(step === 0 && st.canProceed && st.exerciseType !== "speaking_avatar")) {
@@ -2410,20 +2856,8 @@
 
       if (!st.canProceed && !isInteractiveTask && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo && !st.video.ended))) {
         const docs = getAllDocs();
-        let seeked = false;
-        for (const doc of docs) {
-          doc.querySelectorAll("video").forEach((v) => {
-            try {
-              if (isFinite(v.duration) && v.duration > 0 && !v.ended) {
-                v.currentTime = Math.max(0, v.duration - 0.25);
-                v.play().catch(() => {});
-                seeked = true;
-              }
-            } catch (_) {}
-          });
-        }
-        if (seeked) {
-          await sleep(600);
+        const seekCount = await fastForwardPassiveMedia(docs);
+        if (seekCount > 0) {
           const afterSeekSt = inspectState();
           if (afterSeekSt.nextButtonId) {
             const btn = resolveElement(afterSeekSt.nextButtonId);
@@ -2567,29 +3001,25 @@
       if (!clickedTarget && !st.canProceed) {
         const docs = getAllDocs();
         let unlockedMedia = false;
-        for (const doc of docs) {
-          const mediaAudioBtns = Array.from(
-            doc.querySelectorAll(".audio-btn, button[aria-label^='Play audio'], button[data-qa='media-playback-control']")
-          ).filter(isVisible);
-          if (mediaAudioBtns.length > 0) {
-            for (const b of mediaAudioBtns) {
-              await simulateClick(b);
-              await sleep(60);
+        const hasVideoEl = docs.some((d) => d.querySelector("video"));
+        if (!hasVideoEl) {
+          for (const doc of docs) {
+            const mediaAudioBtns = Array.from(
+              doc.querySelectorAll(".audio-btn, button[aria-label^='Play audio'], button[data-qa='media-playback-control']")
+            ).filter(isVisible);
+            if (mediaAudioBtns.length > 0) {
+              for (const b of mediaAudioBtns) {
+                await simulateClick(b);
+                await sleep(60);
+              }
+              unlockedMedia = true;
             }
-            unlockedMedia = true;
-          }
-          const mediaVideos = Array.from(doc.querySelectorAll("video, audio")).filter(
-            (m) => isFinite(m.duration) && m.duration > 0 && !m.ended
-          );
-          if (mediaVideos.length > 0) {
-            for (const v of mediaVideos) {
-              try { v.currentTime = Math.max(0, v.duration - 0.1); } catch (_) {}
-            }
-            unlockedMedia = true;
           }
         }
+        const mediaSeeked = await fastForwardPassiveMedia(docs);
+        if (mediaSeeked > 0) unlockedMedia = true;
         if (unlockedMedia) {
-          await sleep(300);
+          await sleep(220);
           const checkSt = inspectState();
           if (checkSt.canProceed && checkSt.nextButtonId) {
             const btn = resolveElement(checkSt.nextButtonId);
@@ -3147,47 +3577,78 @@
       if (targetEl.classList.contains("correct") || (targetEl.closest && targetEl.closest(".correct"))) {
         continue;
       }
+      // Skip if already marked incorrect
+      if (targetEl.classList.contains("incorrect") || (targetEl.closest && targetEl.closest(".incorrect"))) {
+        continue;
+      }
 
-      await simulateClick(targetEl);
-      clicked.push(`${meta.id} ("${text}")`);
+      for (let clickTry = 0; clickTry < 2; clickTry++) {
+        await simulateClick(targetEl);
+        if (clickTry === 0) clicked.push(`${meta.id} ("${text}")`);
 
-      // Fast-poll: abort immediately if marked incorrect (within 30-50ms)!
-      const waitStart = Date.now();
-      while (Date.now() - waitStart < Math.max(delayMs, 220)) {
-        await sleep(30);
-        const checkSt = inspectState();
-        if (checkSt.canProceed && !isCheckOrSubmitButton(checkSt) && !checkSt.feedback.startsWith("incorrect")) {
-          return {
-            success: true,
-            message: `Unlocked progression with ${meta.id} ("${text}")`,
-            nextButtonId: checkSt.nextButtonId,
-            clicked
-          };
-        }
-
-        const elNow = resolveElement(meta.id) || targetEl;
-        const hasIncClass = elNow && (
-          elNow.classList.contains("incorrect") ||
-          (elNow.closest && elNow.closest(".incorrect")) ||
-          (elNow.querySelector && elNow.querySelector(".incorrect"))
-        );
-        if (hasIncClass || (checkSt.feedback && checkSt.feedback.startsWith("incorrect"))) {
-          // In multi-select checkboxes, deselect the wrong option so it doesn't block progress
-          if (elNow.classList.contains("is-selected") || elNow.getAttribute("aria-checked") === "true") {
-            await simulateClick(elNow);
-            await sleep(40);
+        // Fast-poll: abort immediately if marked incorrect (within 30-50ms)!
+        let sawOutcome = false;
+        let wasIncorrect = false;
+        const waitStart = Date.now();
+        while (Date.now() - waitStart < Math.max(delayMs, 240)) {
+          await sleep(30);
+          const checkSt = inspectState();
+          if (checkSt.canProceed && !isCheckOrSubmitButton(checkSt) && !checkSt.feedback.startsWith("incorrect")) {
+            return {
+              success: true,
+              message: `Unlocked progression with ${meta.id} ("${text}")`,
+              nextButtonId: checkSt.nextButtonId,
+              clicked
+            };
           }
-          break; // break immediately to next candidate!
+
+          const elNow = resolveElement(meta.id) || targetEl;
+          const hasIncClass = elNow && (
+            elNow.classList.contains("incorrect") ||
+            (elNow.closest && elNow.closest(".incorrect")) ||
+            (elNow.querySelector && elNow.querySelector(".incorrect"))
+          );
+          if (hasIncClass || (checkSt.feedback && checkSt.feedback.startsWith("incorrect"))) {
+            sawOutcome = true;
+            wasIncorrect = true;
+            // In multi-select checkboxes, deselect the wrong option so it doesn't block progress
+            if (elNow.classList.contains("is-selected") || elNow.getAttribute("aria-checked") === "true") {
+              await simulateClick(elNow);
+              await sleep(40);
+            }
+            break;
+          }
+
+          const hasCorClass = elNow && (
+            elNow.classList.contains("correct") ||
+            (elNow.closest && elNow.closest(".correct"))
+          );
+          if (hasCorClass) {
+            sawOutcome = true;
+            break;
+          }
+
+          const hasCheckBtn = checkSt.elements.some(
+            (e) => e.type === "next_btn" && !e.disabled && /\b(check|submit|проверить)\b/i.test(e.text)
+          );
+          if (hasCheckBtn) {
+            sawOutcome = true;
+            break;
+          }
         }
 
-        const hasCorClass = elNow && (
-          elNow.classList.contains("correct") ||
-          (elNow.closest && elNow.closest(".correct"))
-        );
-        if (hasCorClass) {
-          // Option is correct! In multi-select, keep it selected and proceed to test next
+        if (wasIncorrect) {
+          // Wait for Catalyst's .incorrect shake animation lock to clear before clicking the next option!
+          await sleep(240);
+          await waitUntilUnlocked(1200);
           break;
         }
+        if (sawOutcome) {
+          break;
+        }
+        // If click produced neither .correct nor .incorrect nor Check button (swallowed during cooldown), wait and retry once
+        await sleep(200);
+        await waitUntilUnlocked(1200);
       }
 
       // Check if a Check/Submit button appeared and needs clicking
@@ -3199,7 +3660,7 @@
         const checkEl = resolveElement(checkBtn.id);
         if (checkEl) {
           await simulateClick(checkEl);
-          await sleep(80);
+          await sleep(100);
           const afterCheck = inspectState();
           const elAfter = resolveElement(meta.id) || targetEl;
           const markedInc = elAfter && (
@@ -3219,11 +3680,31 @@
               clicked
             };
           }
+          if (markedInc) {
+            await sleep(220);
+            await waitUntilUnlocked(1200);
+          }
         }
       }
     }
 
-    const finalState = inspectState();
+    // Final sweep for single-choice: if only 1 enabled non-incorrect choice remains, click it after cooldown
+    let finalState = inspectState();
+    if (!finalState.canProceed) {
+      const remChoices = finalState.elements.filter(
+        (e) => e.type === "choice" && !e.disabled && !(e.className || "").includes("incorrect")
+      );
+      if (remChoices.length === 1) {
+        await sleep(220);
+        const remEl = resolveElement(remChoices[0].id);
+        if (remEl) {
+          await simulateClick(remEl);
+          clicked.push(`${remChoices[0].id} ("${remChoices[0].text}")`);
+          await sleep(200);
+          finalState = inspectState();
+        }
+      }
+    }
     if (finalState.canProceed && !isCheckOrSubmitButton(finalState) && !finalState.feedback.startsWith("incorrect")) {
       return { success: true, message: "Completed options and unlocked progression", nextButtonId: finalState.nextButtonId, clicked };
     }
@@ -3332,9 +3813,10 @@
       await sleep(150);
     }
     const nextRes = await executeAutoNext(9);
+    const nextMsg = nextRes.message || nextRes.error || "stopped";
     return {
       success: true,
-      message: `Skipped ${skipped} pronunciation drill phrase(s) and advanced (${nextRes.message})`,
+      message: `Skipped ${skipped} pronunciation drill phrase(s) and advanced (${nextMsg})`,
       skipped,
       nextResult: nextRes
     };
@@ -3430,6 +3912,776 @@
     };
   }
 
+  // ==========================================================================================
+  // AUTONOMOUS REGULAR-LESSON SOLVERS (Selection Gaps, Categorize, Pairs, Dialogue Order, Blanks)
+  // Strictly disabled on Progress Tests (isProgressTest() === true) to safeguard exam scores.
+  // ==========================================================================================
+
+  // Solver 4: Autonomous Selection-Gaps Solver (trials enabled drawer options per gap until committed)
+  async function solveSelectionGaps() {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve gaps') is strictly disabled on formal assessments."
+      };
+    }
+    await dismissOverlaysIfPresent();
+    const docs = getAllDocs();
+    const triedByGap = new WeakMap();
+    const filled = [];
+
+    const getGapButtons = () => {
+      const list = [];
+      for (const doc of docs) {
+        list.push(
+          ...Array.from(doc.querySelectorAll("button.selection-gap-button")).filter((b) => {
+            if (!isVisible(b)) return false;
+            const cls = getClassName(b).toLowerCase();
+            return !cls.includes("correct");
+          })
+        );
+      }
+      return list;
+    };
+
+    for (let guard = 0; guard < 24; guard++) {
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) break;
+
+      const gaps = getGapButtons();
+      if (gaps.length === 0) break;
+
+      const gapBtn = gaps[0];
+      if (!triedByGap.has(gapBtn)) triedByGap.set(gapBtn, new Set());
+      const triedSet = triedByGap.get(gapBtn);
+
+      // Open drawer for gapBtn if not currently open for it
+      let opts = getVisibleDrawerOptionNodes(docs);
+      if (opts.length === 0 || lastOpenedGapEl !== gapBtn) {
+        const prevNodes = new Set(opts);
+        await simulateClick(gapBtn);
+        lastOpenedGapEl = gapBtn;
+        const wStart = Date.now();
+        while (Date.now() - wStart < 550) {
+          await sleep(35);
+          opts = getVisibleDrawerOptionNodes(docs);
+          if (opts.length > 0 && (prevNodes.size === 0 || opts.some((o) => !prevNodes.has(o)) || Date.now() - wStart >= 200)) {
+            break;
+          }
+        }
+        if (opts.length === 0) {
+          await simulateClick(gapBtn);
+          lastOpenedGapEl = gapBtn;
+          const rStart = Date.now();
+          while (Date.now() - rStart < 450) {
+            await sleep(35);
+            opts = getVisibleDrawerOptionNodes(docs);
+            if (opts.length > 0) break;
+          }
+        }
+      }
+
+      const candidates = opts.filter((o) => {
+        const cls = getClassName(o).toLowerCase();
+        if (cls.includes("disabled") || cls.includes("incorrect")) return false;
+        const t = cleanText(o).toLowerCase();
+        return t && !triedSet.has(t);
+      });
+      const pool =
+        candidates.length > 0
+          ? candidates
+          : opts.filter((o) => !getClassName(o).toLowerCase().includes("disabled"));
+
+      if (pool.length === 0) break;
+
+      let gapSolved = false;
+      for (const opt of pool) {
+        const wordText = cleanText(opt);
+        triedSet.add(wordText.toLowerCase());
+        await simulateClick(opt);
+
+        const cStart = Date.now();
+        let wasWrong = false;
+        while (Date.now() - cStart < 420) {
+          await sleep(35);
+          if (!gapBtn.isConnected || !isVisible(gapBtn)) {
+            gapSolved = true;
+            break;
+          }
+          const gCls = getClassName(gapBtn).toLowerCase();
+          const oCls = getClassName(opt).toLowerCase();
+          if (gCls.includes("correct") || oCls.includes("correct")) {
+            gapSolved = true;
+            break;
+          }
+          if (gCls.includes("incorrect") || oCls.includes("incorrect")) {
+            wasWrong = true;
+            break;
+          }
+        }
+
+        if (gapSolved) {
+          filled.push(wordText);
+          lastOpenedGapEl = null;
+          await sleep(100);
+          break;
+        }
+        if (wasWrong) {
+          await sleep(220);
+          await waitUntilUnlocked(1000);
+          // Re-open gapBtn drawer if it closed after wrong click
+          if (getVisibleDrawerOptionNodes(docs).length === 0 && gapBtn.isConnected && isVisible(gapBtn)) {
+            await simulateClick(gapBtn);
+            lastOpenedGapEl = gapBtn;
+            await sleep(140);
+          }
+        }
+      }
+    }
+
+    const endSt = inspectState();
+    return {
+      success: endSt.canProceed || getGapButtons().length === 0,
+      message: `Solved selection gaps (${filled.length} filled: ${filled.join(", ")})`,
+      filled
+    };
+  }
+
+  // Solver 5: Autonomous Categorize-Columns Solver (trials category slots per item until item commits)
+  async function solveCategorizeColumns() {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve sort') is strictly disabled on formal assessments."
+      };
+    }
+    await dismissOverlaysIfPresent();
+    const sorted = [];
+    const triedByItem = new Map();
+
+    for (let guard = 0; guard < 35; guard++) {
+      await waitUntilUnlocked(1200);
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) break;
+
+      const dragEls = st.elements.filter((e) => e.type === "draggable" && !e.disabled);
+      const slotEls = st.elements.filter((e) => e.type === "drop_target");
+      if (dragEls.length === 0 || slotEls.length === 0) break;
+
+      const itemMeta = dragEls[0];
+      const itemEl = resolveElement(itemMeta.id);
+      if (!itemEl) break;
+
+      const itemKey = itemMeta.text || itemMeta.id;
+      if (!triedByItem.has(itemKey)) triedByItem.set(itemKey, new Set());
+      const triedSlots = triedByItem.get(itemKey);
+
+      const candidateSlots = slotEls.filter((s) => !triedSlots.has(s.text || s.id));
+      const poolSlots = candidateSlots.length > 0 ? candidateSlots : slotEls;
+
+      let committed = false;
+      for (const slotMeta of poolSlots) {
+        triedSlots.add(slotMeta.text || slotMeta.id);
+        const slotEl = resolveElement(slotMeta.id);
+        if (!slotEl || !itemEl.isConnected) break;
+
+        await simulateClick(itemEl);
+        await sleep(85);
+        await simulateClick(slotEl);
+
+        const cStart = Date.now();
+        let wasWrong = false;
+        while (Date.now() - cStart < 550) {
+          await sleep(40);
+          if (!itemEl.isConnected || !isVisible(itemEl)) {
+            committed = true;
+            break;
+          }
+          const iCls = getClassName(itemEl).toLowerCase();
+          const sCls = getClassName(slotEl).toLowerCase();
+          if (iCls.includes("correct")) {
+            committed = true;
+            break;
+          }
+          if (iCls.includes("incorrect") || sCls.includes("incorrect")) {
+            wasWrong = true;
+            break;
+          }
+        }
+
+        if (committed) {
+          sorted.push(`${itemMeta.text} -> ${slotMeta.text}`);
+          await sleep(90);
+          break;
+        }
+        if (wasWrong) {
+          await sleep(220);
+          await waitUntilUnlocked(1200);
+        }
+      }
+    }
+
+    const endSt = inspectState();
+    return {
+      success: endSt.canProceed || endSt.elements.filter((e) => e.type === "draggable" && !e.disabled).length === 0,
+      message: `Auto-sorted ${sorted.length} items: ${sorted.join(" | ")}`,
+      sorted
+    };
+  }
+
+  // Solver 6: Autonomous Matching-Pairs Solver (handles both slot:item and tap-to-match item:item cards)
+  async function solveMatchingPairs() {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve pair') is strictly disabled on formal assessments."
+      };
+    }
+    await dismissOverlaysIfPresent();
+    const matched = [];
+    const triedPairs = new Set();
+
+    const isCardDone = (el) => {
+      if (!el || !el.isConnected || !isVisible(el)) return true;
+      const cls = getClassName(el).toLowerCase();
+      const pCls = el.parentElement ? getClassName(el.parentElement).toLowerCase() : "";
+      return cls.includes("correct") || cls.includes("disabled") || pCls.includes("correct");
+    };
+
+    for (let guard = 0; guard < 36; guard++) {
+      await waitUntilUnlocked(1200);
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) break;
+
+      const slotEls = st.elements.filter((e) => e.type === "drop_target" && !e.disabled);
+      const dragEls = st.elements.filter((e) => e.type === "draggable" && !e.disabled);
+
+      // Case A: Left slots + right items
+      if (slotEls.length > 0 && dragEls.length > 0) {
+        const activeSlots = slotEls.filter((s) => !isCardDone(resolveElement(s.id)));
+        const activeItems = dragEls.filter((i) => !isCardDone(resolveElement(i.id)));
+        if (activeSlots.length === 0 || activeItems.length === 0) break;
+
+        const leftMeta = activeSlots[0];
+        const leftEl = resolveElement(leftMeta.id);
+        if (!leftEl) break;
+
+        const candidates = activeItems.filter((r) => !triedPairs.has(`${leftMeta.text}||${r.text}`));
+        const pool = candidates.length > 0 ? candidates : activeItems;
+
+        for (const rightMeta of pool) {
+          triedPairs.add(`${leftMeta.text}||${rightMeta.text}`);
+          const rightEl = resolveElement(rightMeta.id);
+          if (!rightEl || isCardDone(leftEl)) break;
+
+          await simulateClick(leftEl);
+          await sleep(85);
+          await simulateClick(rightEl);
+
+          let paired = false;
+          let wasWrong = false;
+          const wStart = Date.now();
+          while (Date.now() - wStart < 520) {
+            await sleep(40);
+            if (isCardDone(leftEl) || isCardDone(rightEl)) {
+              paired = true;
+              break;
+            }
+            const lCls = getClassName(leftEl).toLowerCase();
+            const rCls = getClassName(rightEl).toLowerCase();
+            if (lCls.includes("incorrect") || rCls.includes("incorrect")) {
+              wasWrong = true;
+              break;
+            }
+          }
+          if (paired) {
+            matched.push(`${leftMeta.text} -> ${rightMeta.text}`);
+            await sleep(90);
+            break;
+          }
+          if (wasWrong) {
+            await sleep(240);
+            await waitUntilUnlocked(1200);
+          }
+        }
+        continue;
+      }
+
+      // Case B: Tap-to-match cards (no slots, all cards are draggables)
+      const activeCards = dragEls.filter((c) => !isCardDone(resolveElement(c.id)));
+      if (activeCards.length < 2) break;
+
+      const sug = suggestImageWordPairs(activeCards);
+      if (sug && sug.pairs.length > 0 && guard === 0) {
+        const spec = sug.pairs.map((p) => `${p.img}:${p.word}`).join(", ");
+        await executePair(spec);
+        continue;
+      }
+
+      const firstMeta = activeCards[0];
+      const firstEl = resolveElement(firstMeta.id);
+      if (!firstEl) break;
+      const others = activeCards.slice(1).filter((c) => !triedPairs.has(`${firstMeta.text}||${c.text}`));
+      const pool = others.length > 0 ? others : activeCards.slice(1);
+
+      for (const secondMeta of pool) {
+        triedPairs.add(`${firstMeta.text}||${secondMeta.text}`);
+        triedPairs.add(`${secondMeta.text}||${firstMeta.text}`);
+        const secondEl = resolveElement(secondMeta.id);
+        if (!secondEl || isCardDone(firstEl)) break;
+
+        await simulateClick(firstEl);
+        await sleep(85);
+        await simulateClick(secondEl);
+
+        let paired = false;
+        let wasWrong = false;
+        const wStart = Date.now();
+        while (Date.now() - wStart < 520) {
+          await sleep(40);
+          if (isCardDone(firstEl) || isCardDone(secondEl)) {
+            paired = true;
+            break;
+          }
+          if (
+            getClassName(firstEl).toLowerCase().includes("incorrect") ||
+            getClassName(secondEl).toLowerCase().includes("incorrect")
+          ) {
+            wasWrong = true;
+            break;
+          }
+        }
+        if (paired) {
+          matched.push(`${firstMeta.text} -> ${secondMeta.text}`);
+          await sleep(90);
+          break;
+        }
+        if (wasWrong) {
+          await sleep(240);
+          await waitUntilUnlocked(1200);
+        }
+      }
+    }
+
+    const endSt = inspectState();
+    return {
+      success: endSt.canProceed,
+      message: `Auto-matched ${matched.length} pairs: ${matched.join(" | ")}`,
+      matched
+    };
+  }
+
+  // Solver 7: Autonomous Order-Dialogue Solver (ef-sequencing-task)
+  // Uses Catalyst's per-slot locking after clicking Check: any item in its true slot loses .is-unassessed and locks!
+  async function solveOrderDialogue() {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver ('solve order') is strictly disabled on formal assessments."
+      };
+    }
+    await dismissOverlaysIfPresent();
+    const docs = getAllDocs();
+    const triedByPos = new Map();
+
+    const getSortItems = () => {
+      const list = [];
+      for (const doc of docs) {
+        const items = Array.from(doc.querySelectorAll("ef-sequencing-sort-column-item")).filter(isVisible);
+        if (items.length > 0) {
+          list.push(...items);
+        } else {
+          list.push(...Array.from(doc.querySelectorAll("ef-sequencing-task .cdk-drag, .cdk-drag")).filter(isVisible));
+        }
+      }
+      return list;
+    };
+
+    const isItemUnlocked = (el) => {
+      if (!el) return false;
+      const cls = getClassName(el).toLowerCase();
+      if (cls.includes("is-correct") || cls.includes("correct") || el.querySelector(".is-correct, .correct")) {
+        return false;
+      }
+      if (cls.includes("is-unassessed") || el.querySelector(".is-unassessed")) {
+        return true;
+      }
+      // If no items have .is-unassessed yet, treat as unlocked until Check locks them
+      const all = getSortItems();
+      const anyUnassessed = all.some(
+        (x) => getClassName(x).toLowerCase().includes("is-unassessed") || x.querySelector(".is-unassessed")
+      );
+      return !anyUnassessed;
+    };
+
+    const findCheckBtn = () => {
+      for (const doc of docs) {
+        const btn = Array.from(
+          doc.querySelectorAll("button.check-task-button, button.next-task-button")
+        ).find((b) => isVisible(b) && /\b(check|submit|проверить)\b/i.test(cleanText(b)));
+        if (btn) return btn;
+      }
+      return null;
+    };
+
+    if (!findCheckBtn()) {
+      return {
+        success: false,
+        message: "No Check button found for order_dialogue; requires manual ordering"
+      };
+    }
+
+    const clickCheckBtn = async () => {
+      const btn = findCheckBtn();
+      if (btn && !btn.disabled) {
+        await simulateClick(btn);
+        await sleep(260);
+        await waitUntilUnlocked(1200);
+        return true;
+      }
+      return false;
+    };
+
+    // Ensure data-efekta-id attributes are assigned before any cdkSort drag
+    inspectState();
+
+    // Initial check: if Check is disabled before any drag, swap the last two items to enable Check
+    let checkedInit = await clickCheckBtn();
+    if (!checkedInit) {
+      inspectState();
+      const initItems = getSortItems();
+      if (initItems.length >= 2 && !(inspectState().canProceed && !isCheckOrSubmitButton(inspectState()))) {
+        await simulateDragAndDrop(initItems[initItems.length - 1], initItems[initItems.length - 2]);
+        await sleep(160);
+        await clickCheckBtn();
+      }
+    }
+
+    let moves = 0;
+    for (let round = 0; round < 18; round++) {
+      await waitUntilUnlocked(1200);
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) {
+        return {
+          success: true,
+          message: `Auto-ordered dialogue sequence in ${moves} move(s)`,
+          moves
+        };
+      }
+
+      const items = getSortItems();
+      if (items.length < 2) break;
+
+      const firstUnlockedIdx = items.findIndex(isItemUnlocked);
+      if (firstUnlockedIdx === -1 || firstUnlockedIdx >= items.length - 1) {
+        await clickCheckBtn();
+        break;
+      }
+
+      if (!triedByPos.has(firstUnlockedIdx)) triedByPos.set(firstUnlockedIdx, new Set());
+      const triedAtPos = triedByPos.get(firstUnlockedIdx);
+      const curTopText = cleanText(items[firstUnlockedIdx]).toLowerCase();
+      if (curTopText) triedAtPos.add(curTopText);
+
+      // Pick the first unlocked candidate below firstUnlockedIdx that hasn't been tried at firstUnlockedIdx yet
+      let candIdx = -1;
+      for (let k = firstUnlockedIdx + 1; k < items.length; k++) {
+        if (isItemUnlocked(items[k]) && !triedAtPos.has(cleanText(items[k]).toLowerCase())) {
+          candIdx = k;
+          break;
+        }
+      }
+      if (candIdx === -1) {
+        for (let k = firstUnlockedIdx + 1; k < items.length; k++) {
+          if (isItemUnlocked(items[k])) {
+            candIdx = k;
+            break;
+          }
+        }
+      }
+      if (candIdx === -1) break;
+
+      const candText = cleanText(items[candIdx]).toLowerCase();
+      if (candText) triedAtPos.add(candText);
+
+      // Perform an exact transposition (swap) between firstUnlockedIdx and candIdx:
+      // 1) Drag candIdx up to firstUnlockedIdx (old firstUnlockedIdx shifts to firstUnlockedIdx + 1)
+      // 2) If candIdx > firstUnlockedIdx + 1, drag firstUnlockedIdx + 1 down to candIdx so all intermediate locked items stay in place!
+      inspectState();
+      const curItems1 = getSortItems();
+      await simulateDragAndDrop(curItems1[candIdx], curItems1[firstUnlockedIdx]);
+      moves++;
+      await sleep(120);
+      if (candIdx > firstUnlockedIdx + 1) {
+        inspectState();
+        const curItems2 = getSortItems();
+        if (curItems2[firstUnlockedIdx + 1] && curItems2[candIdx]) {
+          await simulateDragAndDrop(curItems2[firstUnlockedIdx + 1], curItems2[candIdx]);
+          await sleep(120);
+        }
+      }
+      await clickCheckBtn();
+    }
+
+    const endSt = inspectState();
+    const solved = endSt.canProceed && !isCheckOrSubmitButton(endSt);
+    return {
+      success: solved,
+      message: solved
+        ? `Auto-ordered dialogue sequence in ${moves} move(s)`
+        : `Attempted ${moves} ordering move(s); inspect agentHint.items ([✓] marks locked positions)`,
+      moves
+    };
+  }
+
+  // Solver 8: Autonomous Fill-in-the-Blanks Table Solver (for ef-writing-gap-task with button.typing-status)
+  // Derives word-family forms (Verb <-> Noun) + matches words from autoReadNotes and commits via button.typing-status.
+  async function solveFillInTheBlanks(notes = []) {
+    if (isProgressTest()) {
+      return {
+        success: false,
+        error: "Progress Test detected: trial-and-error solver is strictly disabled on formal assessments."
+      };
+    }
+    const docs = getAllDocs();
+    const hasTypingStatusTable = docs.some((d) =>
+      d.querySelector("ef-writing-gap-task, ef-gapfill-item, table input")
+    );
+    if (!hasTypingStatusTable) {
+      return { success: false, message: "Free-text blanks require contextual answer" };
+    }
+
+    const noteWords = [];
+    for (const line of notes || []) {
+      for (const tok of String(line).split(/[^a-zA-Z'-]+/)) {
+        const w = tok.trim().toLowerCase();
+        if (w.length >= 3 && !noteWords.includes(w)) noteWords.push(w);
+      }
+    }
+
+    const buildWordFamilyCandidates = (baseWord) => {
+      const w = String(baseWord || "").trim().toLowerCase();
+      if (!w || w.length < 3) return [];
+      const cands = [];
+      const push = (x) => {
+        if (x && x.length >= 3 && !cands.includes(x)) cands.push(x);
+      };
+
+      // Prioritize any word from autoReadNotes that shares a 4-letter stem with w
+      const stem = w.slice(0, Math.min(4, w.length));
+      for (const nw of noteWords) {
+        if (nw !== w && nw.startsWith(stem)) push(nw);
+      }
+      if (noteWords.includes(w)) push(w);
+
+      // Noun -> Verb derivations
+      if (w.endsWith("ation")) {
+        push(w.slice(0, -5)); // resignation -> resign, information -> inform
+        push(w.slice(0, -5) + "e"); // evaluation -> evaluate, communication -> communicate
+      }
+      if (w.endsWith("ition")) {
+        push(w.slice(0, -5) + "e");
+        push(w.slice(0, -4));
+      }
+      if (w.endsWith("sion")) {
+        push(w.slice(0, -4) + "de"); // conclusion -> conclude, decision -> decide
+        push(w.slice(0, -4) + "d");
+        push(w.slice(0, -3) + "s"); // discussion -> discuss
+      }
+      if (w.endsWith("al")) {
+        push(w.slice(0, -2) + "e"); // proposal -> propose, approval -> approve
+        push(w.slice(0, -2));
+      }
+      if (w.endsWith("ment")) {
+        push(w.slice(0, -4)); // agreement -> agree, improvement -> improve
+      }
+      // Zero-derivation (start -> start, budget -> budget, promise -> promise)
+      push(w);
+      // Verb -> Noun derivations
+      if (w.endsWith("e")) {
+        push(w.slice(0, -1) + "al"); // propose -> proposal
+        push(w.slice(0, -1) + "ation"); // evaluate -> evaluation
+        push(w + "ment"); // agree -> agreement
+        if (w.endsWith("de")) push(w.slice(0, -2) + "sion"); // conclude -> conclusion
+      } else {
+        push(w + "ation"); // resign -> resignation
+        push(w + "ion"); // discuss -> discussion
+        push(w + "ment");
+        push(w + "al");
+      }
+      return cands;
+    };
+
+    const filled = [];
+    for (let guard = 0; guard < 12; guard++) {
+      const st = inspectState();
+      if (st.canProceed && !isCheckOrSubmitButton(st)) break;
+
+      let activeInput = null;
+      for (const doc of docs) {
+        activeInput = Array.from(
+          doc.querySelectorAll("ef-gapfill-item input, tr input, input:not([type='hidden'])")
+        ).find(isVisible);
+        if (activeInput) break;
+      }
+      if (!activeInput) break;
+
+      const row = activeInput.closest && activeInput.closest("tr");
+      let siblingWord = "";
+      if (row) {
+        const inputCell = activeInput.closest && activeInput.closest("td, th");
+        const cells = Array.from(row.querySelectorAll("td, th"));
+        for (const c of cells) {
+          if (c !== inputCell && !(c.querySelector && c.querySelector("input, textarea, [contenteditable='true']"))) {
+            const t = cleanText(c);
+            if (t) {
+              siblingWord = t;
+              break;
+            }
+          }
+        }
+      }
+
+      const candidates = buildWordFamilyCandidates(siblingWord);
+      if (candidates.length === 0) break;
+
+      let rowSolved = false;
+      for (const cand of candidates) {
+        if (!activeInput.isConnected || !isVisible(activeInput)) {
+          rowSolved = true;
+          break;
+        }
+        await simulateType(activeInput, cand, 4);
+        let submitBtn = null;
+        const fStart = Date.now();
+        while (Date.now() - fStart < 380) {
+          const scope =
+            (activeInput.closest && activeInput.closest("ef-gapfill-item, td, tr")) ||
+            activeInput.ownerDocument;
+          submitBtn =
+            scope &&
+            Array.from(scope.querySelectorAll("button.typing-status, .typing-status")).find(isVisible);
+          if (submitBtn) break;
+          await sleep(40);
+        }
+        if (submitBtn) {
+          await simulateClick(submitBtn);
+          const cStart = Date.now();
+          while (Date.now() - cStart < 380) {
+            await sleep(40);
+            if (!activeInput.isConnected || !isVisible(activeInput)) {
+              rowSolved = true;
+              break;
+            }
+          }
+        }
+        if (rowSolved) {
+          filled.push(cand);
+          await sleep(100);
+          break;
+        }
+        await sleep(140);
+      }
+      if (!rowSolved) break;
+    }
+
+    const endSt = inspectState();
+    return {
+      success: endSt.canProceed || endSt.elements.filter((e) => e.type === "input").length === 0,
+      message: `Auto-filled ${filled.length} word-family blank(s): ${filled.join(", ")}`,
+      filled
+    };
+  }
+
+  // Dispatch to the matching autonomous solver for the current exerciseType
+  async function solveCurrentExercise() {
+    const st = inspectState();
+    if (st.isProgressTest) {
+      return {
+        success: false,
+        error: "Progress Test detected: autonomous trial-and-error solvers are strictly disabled on formal assessments."
+      };
+    }
+    switch (st.exerciseType) {
+      case "multiple_choice":
+        return await solveMultipleChoice(80);
+      case "selection_gaps":
+        return await solveSelectionGaps();
+      case "categorize_columns":
+        return await solveCategorizeColumns();
+      case "matching_pairs":
+        return await solveMatchingPairs();
+      case "order_dialogue":
+        return await solveOrderDialogue();
+      case "order_sentence":
+        return await executeSequence("auto");
+      case "fill_in_the_blanks":
+        return await solveFillInTheBlanks([]);
+      case "writing_essay":
+        return await executeEssay("auto");
+      case "speaking_practice":
+        return await executeSkipDrill();
+      case "speaking_avatar":
+        return await executeDialogue("");
+      default:
+        return { success: false, error: `No autonomous solver available for exerciseType: ${st.exerciseType}` };
+    }
+  }
+
+  // Step-level Activity Planner: inspects act-1..act-N in ef-activity-navigator to determine
+  // how many activities are passed vs required (> 50%), and which incomplete activity to target next.
+  function analyzeStepActivities(st) {
+    st = st || inspectState();
+    const actEls = (st.elements || []).filter((e) => e.type === "activity_nav");
+    if (actEls.length === 0) return null;
+
+    const items = [];
+    let summaryEl = null;
+    for (const a of actEls) {
+      const txt = (a.text || "").toLowerCase();
+      if (txt.includes("summary")) {
+        summaryEl = a;
+        continue;
+      }
+      const pctMatch = txt.match(/(\d+)%/);
+      const pct = pctMatch
+        ? Number(pctMatch[1])
+        : /\b(completed|complete|passed)\b/i.test(txt)
+        ? 100
+        : 0;
+      items.push({
+        id: a.id,
+        text: a.text,
+        pct,
+        passed: pct >= 100,
+        selected: !!a.selected
+      });
+    }
+    const total = items.length;
+    if (total === 0) return null;
+    const passedCount = items.filter((x) => x.passed).length;
+    const requiredToPass = total <= 2 ? total : Math.floor(total / 2) + 1;
+    const currentIdx = items.findIndex((x) => x.selected);
+    const remainingAfterCurrent =
+      currentIdx >= 0 ? items.slice(currentIdx + 1).filter((x) => !x.passed).length : 0;
+    const earlierIncomplete =
+      currentIdx > 0 ? items.slice(0, currentIdx).filter((x) => !x.passed) : [];
+    const allIncomplete = items.filter((x) => !x.passed);
+
+    return {
+      total,
+      passedCount,
+      requiredToPass,
+      stepAlreadyPassable: passedCount >= requiredToPass,
+      currentIdx,
+      remainingAfterCurrent,
+      earlierIncomplete,
+      allIncomplete,
+      summaryEl,
+      items
+    };
+  }
+
   // Execute single action object (used by both direct messages and batch runner)
   // ==========================================================================================
   // v3.1 ENGINE: avatar-aware helpers, `dialogue` macro and `autopilot` macro
@@ -3501,14 +4753,14 @@
       const el = doc.querySelector("ef-end-of-activity-summary");
       if (el && isVisible(el)) {
         const txt = cleanText(el);
-        const m = txt.match(/Correct answers:\s*(\d+)\s*\/\s*(\d+)/i);
+        const m = txt.match(/Correct answers\s*:\s*(\d+)\s*\/\s*(\d+)/i);
         const btns = Array.from(el.querySelectorAll("button")).filter(isVisible);
         return {
           text: txt.slice(0, 200),
           correct: m ? Number(m[1]) : null,
           total: m ? Number(m[2]) : null,
-          notPassed: /not passed/i.test(txt),
-          passed: /activity:\s*passed/i.test(txt),
+          notPassed: /not\s+passed/i.test(txt),
+          passed: /activity\s*:\s*passed/i.test(txt),
           finishSkipped: globalFinish || btns.find((b) => /finish skipped/i.test(cleanText(b))) || null,
           nextBtn: btns.find((b) => /^next$/i.test(cleanText(b))) || null
         };
@@ -3536,13 +4788,28 @@
       return false;
     }
     st = st || inspectState();
-    if (st.exerciseType === "lesson_overview") {
+    if (st.exerciseType === "lesson_overview" || st.exerciseType === "lesson_completed") {
       avatarStickyAt = 0;
       return false;
     }
+    const docs = getAllDocs();
+    // A 1-activity final video step (act-1 + act-2: summary) with a video player or speech/dialogue task is an avatar dialogue
+    const plan = analyzeStepActivities(st);
+    const isSingleVideoFinalStep =
+      plan &&
+      plan.total === 1 &&
+      st.exerciseType === "video_stage" &&
+      docs.some((d) =>
+        d.querySelector(
+          "ef-multiple-choice-speech-task, ef-video-dialogue, [class*='dialogue'], [class*='avatar']"
+        )
+      );
     const hit =
       st.exerciseType === "speaking_avatar" ||
-      getAllDocs().some((d) => d.querySelector("ef-multiple-choice-speech-task")) ||
+      isSingleVideoFinalStep ||
+      docs.some((d) =>
+        d.querySelector("ef-multiple-choice-speech-task, ef-video-dialogue")
+      ) ||
       /respond when you are prompted/i.test(`${(st.contextText || []).join(" ")} ${st.prompt || ""}`);
     if (hit) avatarStickyAt = Date.now();
     return hit || (Date.now() - avatarStickyAt < 60000 && st.exerciseType === "video_stage");
@@ -3610,6 +4877,9 @@
     let scenario = "";
     let retries = 0;
     let emptyOptPolls = 0;
+    let lastTurnSig = "";
+    const triedTapTexts = new Set();
+    const triedSpeechTexts = new Set();
     const t0 = Date.now();
 
     for (let guard = 0; guard < 60 && Date.now() - t0 < 270000; guard++) {
@@ -3655,14 +4925,36 @@
         const b = resolveElement(st.nextButtonId);
         if (b) {
           emptyOptPolls = 0;
+          triedTapTexts.clear();
+          triedSpeechTexts.clear();
           await simulateClick(b);
           await sleep(500);
           continue;
         }
       }
 
-      // 2. If no response options are visible yet, wait briefly for turn to load (with bounded timeout!)
+      // 2. If no response options are visible yet, ensure avatar video is playing (Firefox autoplay fix!) and wait briefly
       if (opts.length === 0) {
+        if (media.hasVideo && media.paused && !media.ended) {
+          for (const doc of getAllDocs()) {
+            doc.querySelectorAll("video").forEach((v) => {
+              try {
+                if (v.paused && !v.ended) {
+                  v.muted = true;
+                  v.defaultMuted = true;
+                  const p = v.play();
+                  if (p && typeof p.catch === "function") p.catch(() => {});
+                }
+              } catch (_) {}
+            });
+            const playBtn = Array.from(
+              doc.querySelectorAll("button[aria-label^='Play'], button.btn, button[data-qa='media-playback-control']")
+            ).find((b) => isVisible(b) && /^play(\s+audio|\s+video)?$/i.test(cleanText(b)));
+            if (playBtn) {
+              simulateClick(playBtn).catch(() => {});
+            }
+          }
+        }
         emptyOptPolls++;
         const waitingForMedia = !!(media.isPlaying || (media.hasVideo && !media.ended));
         const inAvatar = isAvatarContext(st);
@@ -3681,7 +4973,14 @@
       }
       emptyOptPolls = 0;
 
-      // Pick option for this turn
+      const curTurnSig = opts.map((o) => o.text).join("|");
+      if (curTurnSig !== lastTurnSig) {
+        triedTapTexts.clear();
+        triedSpeechTexts.clear();
+        lastTurnSig = curTurnSig;
+      }
+
+      // Pick option for this turn (excluding options already marked .incorrect or already spoken without unlocking Next!)
       const want = picks[turns.length];
       let choice = null;
       if (want) {
@@ -3694,9 +4993,21 @@
           null;
       }
       let how = "pick";
-      const availableOpts = opts.filter((o) => !o.incorrect);
-      const pool = availableOpts.length > 0 ? availableOpts : opts;
-      if (!choice || (choice.incorrect && availableOpts.length > 0)) {
+      const availableOpts = opts.filter(
+        (o) => !o.incorrect && !triedSpeechTexts.has(o.text.toLowerCase())
+      );
+      const fallbackOpts = opts.filter((o) => !o.incorrect);
+      const pool =
+        availableOpts.length > 0
+          ? availableOpts
+          : fallbackOpts.length > 0
+          ? fallbackOpts
+          : opts;
+      if (
+        !choice ||
+        ((choice.incorrect || triedSpeechTexts.has(choice.text.toLowerCase())) &&
+          availableOpts.length > 0)
+      ) {
         how = "heuristic";
         choice = pool
           .map((o) => ({ o, s: scoreDialogueOption(o.text, scenario) }))
@@ -3716,10 +5027,13 @@
           }
           await sleep(250);
         }
+        triedSpeechTexts.add(choice.text.toLowerCase());
         res = await speakSinglePhrase(choice.id);
         const after = inspectState();
-        if (!(res.success || after.canProceed)) {
-          if (++retries > 2) {
+        if (!after.canProceed) {
+          // If speech was recognized by ASR (res.success) but Next didn't unlock, choice was the wrong dialogue option;
+          // immediately try the next untried option on the next loop iteration!
+          if (!res.success && ++retries > 2) {
             const skipBtn = findSkipButtonEl();
             if (skipBtn) {
               await simulateClick(skipBtn);
@@ -3736,18 +5050,36 @@
           continue;
         }
         retries = 0;
+        triedSpeechTexts.clear();
         turns.push({ turn: turns.length + 1, option: `${choice.id} ${choice.letter}`.trim(), text: choice.text, how });
       } else {
         // Tap turn (multiple-choice): solve using smart choice solver with instant abort on wrong options!
         res = await solveMultipleChoice(80);
         if (!res.success) {
-          const choiceEl = resolveElement(choice.id) || findInteractiveByText(choice.text);
+          const untried = pool.find((o) => !triedTapTexts.has(o.text.toLowerCase()));
+          if (!untried) {
+            return {
+              success: false,
+              error: `Dialogue tap turn stuck after trying all ${opts.length} options`,
+              message: `Dialogue tap turn stuck after trying all ${opts.length} options`,
+              turns
+            };
+          }
+          triedTapTexts.add(untried.text.toLowerCase());
+          let choiceEl = resolveElement(untried.id) || findInteractiveByText(untried.text);
+          if (choiceEl && choiceEl.tagName && choiceEl.tagName.toLowerCase() !== "button") {
+            const innerBtn = choiceEl.querySelector && choiceEl.querySelector("button");
+            if (innerBtn) choiceEl = innerBtn;
+          }
           if (choiceEl) {
             await simulateClick(choiceEl);
-            await sleep(140);
+            await sleep(160);
           }
+          turns.push({ turn: turns.length + 1, option: untried.id, text: untried.text, how: "tap_fallback" });
+        } else {
+          triedTapTexts.clear();
+          turns.push({ turn: turns.length + 1, option: choice.id, text: res.message || choice.text, how: "solve_choice" });
         }
-        turns.push({ turn: turns.length + 1, option: choice.id, text: res.message || choice.text, how: "solve_choice" });
       }
 
       await sleep(150);
@@ -4003,6 +5335,7 @@
     const maxSteps = Number(tokens.find((t) => /^\d+$/.test(t))) || 40;
     const steps = [];
     const notes = [];
+    const jumpedToActivities = new Set();
     let lastSig = "";
     let same = 0;
     let emptyWaits = 0;
@@ -4017,7 +5350,10 @@
 
     for (let i = 0; i < maxSteps && Date.now() - t0 < 270000; i++) {
       const st = inspectState();
-      const sig = `${st.url}|${st.exerciseType}|${st.prompt}|${(st.contextText || []).join("|")}|${st.canProceed}`;
+      const actSig = ((st.agentHint && st.agentHint.activities) || []).join(",");
+      const optSig = ((st.agentHint && st.agentHint.options) || []).join(",");
+      const itemSig = ((st.agentHint && st.agentHint.items) || []).join(",");
+      const sig = `${st.url}|${st.exerciseType}|${st.prompt}|${(st.contextText || []).join("|")}|${actSig}|${optSig}|${itemSig}|${st.canProceed}`;
       same = sig === lastSig ? same + 1 : 0;
       lastSig = sig;
       if (same >= 3) {
@@ -4032,6 +5368,22 @@
 
       const t = st.exerciseType;
 
+      if (t === "human_verification_required") {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "human_verification_required",
+          message: "Human verification (Cloudflare Turnstile) is displayed in the browser. Complete it manually in the browser window."
+        });
+      }
+
+      if (t === "lesson_completed") {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "lesson_completed",
+          message: "Lesson completed (all steps passed)! Run 'efekta lesson next --json -c' to start the next lesson."
+        });
+      }
+
       // PROGRESS TEST SAFEGUARD: never run ANY autonomous solver or skip on a graded Progress Test!
       if (st.isProgressTest && isInteractiveExercise(st)) {
         return finish({
@@ -4039,6 +5391,67 @@
           stoppedAt: t === "multiple_choice" ? "progress_test_choice" : t,
           message: `Progress Test detected (${t}): autopilot stopped to preserve exam score. Answer manually using agentHint.actionTemplate.`
         });
+      }
+
+      // Step-level Activity Planner:
+      // 1) If we landed on "Step not passed. Pass at least X activities...", jump directly to the first incomplete activity!
+      const stepPlan = analyzeStepActivities(st);
+      const isStepNotPassedScreen = /step not passed|pass at least \d+ activit/i.test(
+        `${st.prompt || ""} ${(st.contextText || []).join(" ")}`
+      );
+      if (isStepNotPassedScreen && stepPlan && stepPlan.allIncomplete.length > 0) {
+        const targetAct =
+          stepPlan.allIncomplete.find((a) => !jumpedToActivities.has(a.id)) ||
+          stepPlan.allIncomplete[0];
+        if (targetAct) {
+          jumpedToActivities.add(targetAct.id);
+          const actEl = resolveElement(targetAct.id);
+          if (actEl) {
+            await simulateClick(actEl);
+            await sleep(350);
+            steps.push(`step-planner: jumped to incomplete ${targetAct.id} (${targetAct.pct}%)`);
+            continue;
+          }
+        }
+      }
+
+      // 2) If an earlier activity in the current step (e.g. act-1 video or act-2 reading) was skipped at 0%,
+      // and we haven't enough passed activities yet, jump back to complete it first!
+      if (
+        stepPlan &&
+        !stepPlan.stepAlreadyPassable &&
+        stepPlan.earlierIncomplete.length > 0 &&
+        stepPlan.passedCount + stepPlan.remainingAfterCurrent < stepPlan.requiredToPass
+      ) {
+        const missedAct = stepPlan.earlierIncomplete.find(
+          (a) => a.pct === 0 && !jumpedToActivities.has(a.id)
+        );
+        if (missedAct) {
+          jumpedToActivities.add(missedAct.id);
+          const actEl = resolveElement(missedAct.id);
+          if (actEl) {
+            await simulateClick(actEl);
+            await sleep(350);
+            steps.push(`step-planner: completing missed ${missedAct.id} (${missedAct.pct}%)`);
+            continue;
+          }
+        }
+      }
+
+      // If Next/Continue is already unlocked on a regular lesson screen (not Check/Submit, not avatar/speaking),
+      // advance immediately instead of re-running solvers on an already-answered screen!
+      if (
+        st.canProceed &&
+        !isCheckOrSubmitButton(st) &&
+        !st.isProgressTest &&
+        t !== "speaking_avatar" &&
+        t !== "speaking_practice" &&
+        !isAvatarContext(st)
+      ) {
+        const n = await executeAutoNext(9);
+        steps.push(`next: ${n.message || n.error || "stopped"}`);
+        (n.autoReadNotes || []).forEach((x) => notes.push(x));
+        continue;
       }
 
       if (isAvatarContext(st)) {
@@ -4049,7 +5462,14 @@
       }
 
       if (t === "speaking_practice") {
-        const skip = !speakDrills ? findSkipButtonEl() : null;
+        // Smart step planner: only skip pronunciation drill if the step already has (or will have from remaining activities)
+        // enough passed activities (> 50%). Otherwise speak the drill via Voice Engine v3 so the step passes!
+        const canSafelySkipDrill =
+          !speakDrills &&
+          (!stepPlan ||
+            stepPlan.stepAlreadyPassable ||
+            stepPlan.passedCount + stepPlan.remainingAfterCurrent >= stepPlan.requiredToPass);
+        const skip = canSafelySkipDrill ? findSkipButtonEl() : null;
         if (skip) {
           const sRes = await executeSkipDrill();
           steps.push(sRes.message);
@@ -4081,6 +5501,56 @@
         }
       }
 
+      if (t === "selection_gaps") {
+        const sol = await solveSelectionGaps();
+        if (sol.success) {
+          steps.push(`solved selection gaps: ${sol.message}`);
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (t === "categorize_columns") {
+        const sol = await solveCategorizeColumns();
+        if (sol.success) {
+          steps.push(`solved categorize columns: ${sol.message}`);
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (t === "matching_pairs") {
+        const sol = await solveMatchingPairs();
+        if (sol.success) {
+          steps.push(`solved matching pairs: ${sol.message}`);
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (t === "order_dialogue") {
+        const sol = await solveOrderDialogue();
+        if (sol.success) {
+          steps.push(`solved order dialogue: ${sol.message}`);
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
+      if (t === "fill_in_the_blanks") {
+        const sol = await solveFillInTheBlanks(notes);
+        if (sol.success) {
+          steps.push(`solved fill in the blanks: ${sol.message}`);
+          const n = await executeAutoNext(9);
+          (n.autoReadNotes || []).forEach((x) => notes.push(x));
+          continue;
+        }
+      }
+
       if (t === "writing_essay") {
         const r = await executeEssay("auto");
         steps.push(`essay: ${r.message}`);
@@ -4102,24 +5572,6 @@
             const n = await executeAutoNext(9);
             (n.autoReadNotes || []).forEach((x) => notes.push(x));
             continue;
-          }
-        }
-      }
-
-      if (t === "matching_pairs") {
-        const dragEls = (st.elements || []).filter((e) => e.type === "draggable" && !e.disabled);
-        const slotEls = (st.elements || []).filter((e) => e.type === "drop_target");
-        if (slotEls.length === 0 && dragEls.length >= 4) {
-          const sug = suggestImageWordPairs(dragEls);
-          if (sug && sug.confident) {
-            const pairSpec = sug.pairs.map((p) => `${p.img}:${p.word}`).join(", ");
-            const r = await executePair(pairSpec);
-            if (r.success) {
-              steps.push(`matched pairs: ${r.message}`);
-              const n = await executeAutoNext(9);
-              (n.autoReadNotes || []).forEach((x) => notes.push(x));
-              continue;
-            }
           }
         }
       }
@@ -4164,8 +5616,15 @@
       }
 
       const n = await executeAutoNext(9);
-      steps.push(`next: ${n.message}`);
+      steps.push(`next: ${n.message || n.error || "stopped"}`);
       (n.autoReadNotes || []).forEach((x) => notes.push(x));
+      if (t === "video_stage" && (!n.success || (n.hops || 0) === 0)) {
+        return finish({
+          needsAgent: true,
+          stoppedAt: "video_stage",
+          message: n.error || "Video stage could not be auto-advanced - inspect agentHint."
+        });
+      }
     }
     return finish({ needsAgent: false, message: "Autopilot step budget reached - run 'autopilot' again to continue." });
   }
@@ -4302,12 +5761,18 @@
     while (Date.now() - loadStart < 4000) {
       const docs = getAllDocs();
       for (const doc of docs) {
-        const levelHeader = doc.querySelector(
-          "[data-id='level-view-header'], .sticky h1, .sticky [class*='text'], main > div > div:first-child"
-        );
-        if (levelHeader && !currentLevel) {
-          const txt = cleanText(levelHeader);
-          if (/level\s*\d+/i.test(txt)) currentLevel = txt;
+        if (!currentLevel) {
+          const levelCandidates = doc.querySelectorAll(
+            "[data-id='level-view-header'], .sticky button, .sticky h1, .sticky, header button, main > div > div:first-child"
+          );
+          for (const el of levelCandidates) {
+            const txt = cleanText(el);
+            const lvlMatch = txt.match(/\blevel\s+\d+\b/i);
+            if (lvlMatch) {
+              currentLevel = lvlMatch[0].replace(/\s+/g, " ");
+              break;
+            }
+          }
         }
 
         const sectionEls = Array.from(
@@ -4592,19 +6057,7 @@
       }
       case "seek": {
         const docs = getAllDocs();
-        let count = 0;
-        for (const doc of docs) {
-          doc.querySelectorAll("video, audio").forEach((m) => {
-            try {
-              if (isFinite(m.duration) && m.duration > 0 && !m.ended) {
-                m.currentTime = Math.max(0, m.duration - 0.25);
-                m.play().catch(() => {});
-                count++;
-              }
-            } catch (_) {}
-          });
-        }
-        await sleep(400);
+        const count = await fastForwardPassiveMedia(docs);
         return { success: true, message: `Fast-forwarded ${count} media element(s)` };
       }
       case "speak":
@@ -4697,7 +6150,31 @@
       }
       case "solve_choice": {
         const res = await solveMultipleChoice(cmd.delayMs || 140);
-        return { success: res.success, message: res.message, data: res };
+        return { success: res.success, message: res.message, error: res.error, data: res };
+      }
+      case "solve_gaps": {
+        const st = inspectState();
+        const res =
+          st.exerciseType === "fill_in_the_blanks"
+            ? await solveFillInTheBlanks([])
+            : await solveSelectionGaps();
+        return { success: res.success, message: res.message, error: res.error, data: res };
+      }
+      case "solve_sort": {
+        const res = await solveCategorizeColumns();
+        return { success: res.success, message: res.message, error: res.error, data: res };
+      }
+      case "solve_pair": {
+        const res = await solveMatchingPairs();
+        return { success: res.success, message: res.message, error: res.error, data: res };
+      }
+      case "solve_order": {
+        const res = await solveOrderDialogue();
+        return { success: res.success, message: res.message, error: res.error, data: res };
+      }
+      case "solve_auto": {
+        const res = await solveCurrentExercise();
+        return { success: res.success, message: res.message, error: res.error, data: res };
       }
       case "solve_sentence": {
         const isTapSeq = getAllDocs().some((d) =>
@@ -4705,6 +6182,13 @@
         );
         if (isTapSeq) {
           return await executeSequence(cmd.target || cmd.text || "auto");
+        }
+        const hasSeqTask = getAllDocs().some((d) =>
+          d.querySelector("ef-sequencing-task, ef-sequencing-sort-column-item")
+        );
+        if (hasSeqTask) {
+          const res = await solveOrderDialogue();
+          return { success: res.success, message: res.message, error: res.error, data: res };
         }
         const res = await solveSentenceHeuristic();
         return { success: res.success, message: res.message, data: res };
