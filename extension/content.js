@@ -12,10 +12,18 @@
       const script = document.createElement("script");
       script.src = chrome.runtime.getURL("injected.js");
       script.onload = () => script.remove();
+      script.onerror = () => script.remove();
       (document.head || document.documentElement).appendChild(script);
     } catch (_) {}
   }
   injectPageScriptFallback();
+
+  function getClassName(el) {
+    if (!el) return "";
+    if (typeof el.className === "string") return el.className;
+    if (el.getAttribute) return el.getAttribute("class") || "";
+    return "";
+  }
 
   // Register frame with background service so commands can be routed directly to iframes
   try {
@@ -183,11 +191,10 @@
     while (Date.now() - start < maxWaitMs) {
       let busy = false;
       for (const doc of docs) {
-        if (
-          doc.querySelector(
-            ".locked, .item-disabled, .matching-option-wp.disabled"
-          )
-        ) {
+        const lockNodes = Array.from(
+          doc.querySelectorAll(".locked, .item-disabled, .matching-option-wp.disabled")
+        );
+        if (lockNodes.some(isVisible)) {
           busy = true;
           break;
         }
@@ -630,9 +637,6 @@
     el.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
     el.dispatchEvent(new FocusEvent("blur", { bubbles: true, composed: true }));
     return true;
-
-    el.dispatchEvent(new Event("change", { bubbles: true }));
-    return true;
   }
 
   // Simulate pressing a special key (Enter, Backspace, Escape, Tab, Space, Arrow*)
@@ -642,17 +646,19 @@
       document.activeElement ||
       document.body;
     const keyMap = {
-      Enter: { key: "Enter", code: "Enter", keyCode: 13 },
-      Escape: { key: "Escape", code: "Escape", keyCode: 27 },
-      Backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
-      Tab: { key: "Tab", code: "Tab", keyCode: 9 },
-      Space: { key: " ", code: "Space", keyCode: 32 },
-      ArrowRight: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
-      ArrowLeft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
-      ArrowDown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
-      ArrowUp: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 }
+      enter: { key: "Enter", code: "Enter", keyCode: 13 },
+      escape: { key: "Escape", code: "Escape", keyCode: 27 },
+      esc: { key: "Escape", code: "Escape", keyCode: 27 },
+      backspace: { key: "Backspace", code: "Backspace", keyCode: 8 },
+      tab: { key: "Tab", code: "Tab", keyCode: 9 },
+      space: { key: " ", code: "Space", keyCode: 32 },
+      arrowright: { key: "ArrowRight", code: "ArrowRight", keyCode: 39 },
+      arrowleft: { key: "ArrowLeft", code: "ArrowLeft", keyCode: 37 },
+      arrowdown: { key: "ArrowDown", code: "ArrowDown", keyCode: 40 },
+      arrowup: { key: "ArrowUp", code: "ArrowUp", keyCode: 38 }
     };
-    const info = keyMap[key] || { key, code: key, keyCode: key.charCodeAt(0) || 0 };
+    const keyStr = String(key || "Enter");
+    const info = keyMap[keyStr.toLowerCase()] || { key: keyStr, code: keyStr, keyCode: keyStr.charCodeAt(0) || 0 };
     const init = {
       key: info.key,
       code: info.code,
@@ -733,15 +739,19 @@
       const docs = getAllDocs();
 
       // Lookup via persistent data attribute (including shadow roots)
+      const escapedTarget =
+        typeof CSS !== "undefined" && typeof CSS.escape === "function"
+          ? CSS.escape(String(target))
+          : String(target).replace(/[^a-zA-Z0-9_-]/g, "\\$&");
       for (const doc of docs) {
         try {
-          const byAttr = doc.querySelector(`[data-efekta-id="${CSS.escape(target)}"]`);
+          const byAttr = doc.querySelector(`[data-efekta-id="${escapedTarget}"]`);
           if (byAttr && isVisible(byAttr)) return byAttr;
           const allHosts = doc.querySelectorAll("*");
           for (const host of allHosts) {
             if (host.shadowRoot) {
               const inner = host.shadowRoot.querySelector(
-                `[data-efekta-id="${CSS.escape(target)}"]`
+                `[data-efekta-id="${escapedTarget}"]`
               );
               if (inner && isVisible(inner)) return inner;
             }
@@ -1102,7 +1112,7 @@
         cls.includes("matching-option-wp") &&
         (cls.includes("correct") ||
           (el.parentElement &&
-            (el.parentElement.className || "").toLowerCase().includes("correct")))
+            getClassName(el.parentElement).toLowerCase().includes("correct")))
       ) {
         continue;
       }
@@ -1440,7 +1450,8 @@
 
     for (const node of contextNodes) {
       let textWithBlanks = "";
-      const walker = document.createTreeWalker(
+      const nodeDoc = node.ownerDocument || document;
+      const walker = nodeDoc.createTreeWalker(
         node,
         NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT,
         {
@@ -1570,6 +1581,7 @@
     let exerciseType = "unknown";
     let actionTemplate = "";
     let summary = "";
+    const progressTest = isProgressTest(docs);
 
     const isActivitySummary = docs.some((doc) => {
       const summaryEl = doc.querySelector(
@@ -1622,9 +1634,9 @@
       actionTemplate = `efekta batch "gaps word1, word2, word3; next" --json -c`;
       summary = `Fill ${slotEls.length} gap buttons in order using 'gaps word1, word2...; next'.`;
     } else if (inputEls.length > 0) {
-      const hasTextarea = getAllDocs().some(
+      const hasTextarea = docs.some(
         (d) =>
-          d.querySelector("textarea, .word-counter") ||
+          Array.from(d.querySelectorAll("textarea, .word-counter")).some(isVisible) ||
           /write\s*\d+\+?\s*words/i.test(d.body?.innerText || "")
       );
       if (hasTextarea) {
@@ -1652,16 +1664,16 @@
         summary = `Tap-to-match: ${dragEls.length} cards. Pair each image card with its word card using 'pair item-A:item-B, ...; next'.`;
       }
     } else if (dragEls.length > 0) {
-      const isTapSequencing = getAllDocs().some((d) =>
-        d.querySelector("ef-sequencing-tap-option-task, .ordered-item-container")
+      const isTapSequencing = docs.some((d) =>
+        Array.from(d.querySelectorAll("ef-sequencing-tap-option-task, .ordered-item-container")).some(isVisible)
       );
       if (isTapSequencing) {
         exerciseType = "order_sentence";
         actionTemplate = `efekta batch "sequence auto; next" --json -c`;
         summary = `Tap-ordering task (${dragEls.length} tokens). Tap tokens into sentence order using 'sequence "<sentence>"; next' or 'sequence auto; next'.`;
       } else {
-        const hasSequencing = getAllDocs().some((d) =>
-          d.querySelector("ef-sequencing-task, [class*='sequencing']")
+        const hasSequencing = docs.some((d) =>
+          Array.from(d.querySelectorAll("ef-sequencing-task, [class*='sequencing']")).some(isVisible)
         );
         if (hasSequencing) {
           exerciseType = "order_dialogue";
@@ -1674,7 +1686,7 @@
         }
       }
     } else if (choiceEls.length >= 2) {
-      if (isProgressTest(docs)) {
+      if (progressTest) {
         exerciseType = "progress_test_choice";
         actionTemplate = `efekta batch "pick opt-X; next" --json -c`;
         summary = `PROGRESS TEST: Single-shot formal assessment. Trial-and-error ('solve choice') is disabled to protect your certificate score. Derive the linguistically correct choice and submit with 'pick opt-X; next'.`;
@@ -1744,7 +1756,7 @@
       url: window.location.href,
       title: document.title,
       exerciseType,
-      isProgressTest: isProgressTest(docs),
+      isProgressTest: progressTest,
       prompt,
       contextText: contextLines.slice(0, 12),
       feedback,
@@ -1939,8 +1951,8 @@
       const start = Date.now();
       while (Date.now() - start < 600) {
         await sleep(40);
-        const lCls = (lEl.className || "").toLowerCase();
-        const rCls = (rEl.className || "").toLowerCase();
+        const lCls = getClassName(lEl).toLowerCase();
+        const rCls = getClassName(rEl).toLowerCase();
         if (lCls.includes("correct") || rCls.includes("correct") || !lEl.isConnected) {
           break;
         }
@@ -2062,10 +2074,12 @@
       let quoteChar = "";
       for (let i = 0; i < raw.length; i++) {
         const c = raw[i];
-        // Word-internal apostrophes (e.g. didn't, don't, it's, I'm) are not quote delimiters!
-        if (c === "'" && i > 0 && i < raw.length - 1 && /[a-zA-Z]/.test(raw[i - 1]) && /[a-zA-Z]/.test(raw[i + 1])) {
-          current += c;
-          continue;
+        // Contraction/possessive apostrophes (didn't, I'm, students') are not quote delimiters!
+        if (c === "'" && i > 0 && /[a-zA-Z]/.test(raw[i - 1])) {
+          if (!inQuote || (i < raw.length - 1 && /[a-zA-Z]/.test(raw[i + 1]))) {
+            current += c;
+            continue;
+          }
         }
         if ((c === '"' || c === "'") && (i === 0 || raw[i - 1] !== "\\")) {
           if (!inQuote) {
@@ -2123,7 +2137,16 @@
         targetKey = word.slice(0, eqIdx).trim().toLowerCase();
         word = word.slice(eqIdx + 1).trim();
       }
-      word = word.replace(/^["']|["']$/g, "").trim();
+      // Strip only a matching pair of outer quotes so trailing possessive apostrophes (e.g. students') are preserved
+      if (
+        word.length >= 2 &&
+        ((word.startsWith('"') && word.endsWith('"')) ||
+          (word.startsWith("'") && word.endsWith("'")))
+      ) {
+        word = word.slice(1, -1).trim();
+      } else {
+        word = word.trim();
+      }
 
       if (initialGapButtons.length > 0) {
         // Resolve the exact gap button for this iteration from our upfront snapshot
@@ -2145,7 +2168,7 @@
           gapBtn =
             currentButtons.find((b) => {
               const t = cleanText(b).toLowerCase();
-              const cls = (b.className || "").toLowerCase();
+              const cls = getClassName(b).toLowerCase();
               return (
                 !t ||
                 t.includes("blank") ||
@@ -2157,11 +2180,12 @@
         }
 
         let drawerOpts = getVisibleDrawerOptions();
+        const gapCls = getClassName(gapBtn).toLowerCase();
         const isGapAlreadySelected =
           gapBtn &&
           drawerOpts.length > 0 &&
-          ((gapBtn.className || "").toLowerCase().includes("selected") ||
-            (gapBtn.className || "").toLowerCase().includes("active") ||
+          (gapCls.includes("selected") ||
+            gapCls.includes("active") ||
             gapBtn.getAttribute("aria-expanded") === "true");
 
         if (!isGapAlreadySelected && gapBtn) {
@@ -2186,8 +2210,12 @@
         }
 
         const needle = word.toLowerCase();
+        const enabledOpts = drawerOpts.filter((o) => !o.classList.contains("disabled"));
+        const matchPool = enabledOpts.length > 0 ? enabledOpts : drawerOpts;
         const matchOpt =
+          matchPool.find((o) => cleanText(o).toLowerCase() === needle) ||
           drawerOpts.find((o) => cleanText(o).toLowerCase() === needle) ||
+          matchPool.find((o) => cleanText(o).toLowerCase().includes(needle)) ||
           drawerOpts.find((o) => cleanText(o).toLowerCase().includes(needle));
 
         if (!matchOpt) {
@@ -2221,13 +2249,12 @@
       // Case B: Standard <input> / <textarea> / [contenteditable] blanks
       const st = inspectState();
       const inputEls = st.elements.filter((e) => e.type === "input");
-      const targetId =
-        targetKey || (inputEls[i] ? inputEls[i].id : inputEls[0] ? inputEls[0].id : "");
-      const inputDom = resolveElement(targetId);
+      const targetId = targetKey || (inputEls[i] ? inputEls[i].id : "");
+      const inputDom = targetId ? resolveElement(targetId) : null;
       if (!inputDom) {
         return {
           success: false,
-          error: `No gap button or input element found for "${word}"`,
+          error: `No gap button or input element found for "${word}" (index ${i + 1}, inputs available: ${inputEls.length})`,
           filled
         };
       }
@@ -2251,12 +2278,13 @@
       }
 
       let stNow = inspectState();
-      if (!stNow.canProceed) {
+      // Never blindly guess opts[0] into unfilled gaps on a Progress Test!
+      if (!stNow.canProceed && !stNow.isProgressTest) {
         for (const doc of docsCurrent) {
           const gaps = Array.from(doc.querySelectorAll("button.selection-gap-button")).filter(isVisible);
           const unfilled = gaps.find((b) => {
             const t = cleanText(b).toLowerCase();
-            const cls = (b.className || "").toLowerCase();
+            const cls = getClassName(b).toLowerCase();
             return !t || t.includes("blank") || /^[_.\s-]+$/.test(t) || cls.includes("empty") || !cls.includes("filled");
           });
           if (unfilled) {
@@ -2305,18 +2333,16 @@
       }
       // Passive study flashcards (ef-flashcards-task) are not interactive exercises!
       const docs = getAllDocs();
-      if (docs.some((d) => d.querySelector("ef-flashcards-task"))) {
+      if (docs.some((d) => Array.from(d.querySelectorAll("ef-flashcards-task")).some(isVisible))) {
         return false;
       }
-      // If end-of-activity summary is shown, it's a passive screen!
-      if (
-        docs.some((d) =>
-          d.querySelector(
-            "ef-end-of-activity-summary, .tasks-wp.summary-shown, .summary-wp, .summary-shown"
-          )
-        )
-      ) {
+      // If end-of-activity summary is visible, it's a passive screen!
+      if (isSummaryVisible()) {
         return false;
+      }
+      // Progress Tests MUST never be treated as passive even if a Next/Skip button is enabled by default!
+      if (t === "progress_test_choice" || st.isProgressTest) {
+        return true;
       }
       // If canProceed is ALREADY true (e.g. "Correct answers" review screen where old options are disabled), it's passive!
       if (st.canProceed && t !== "speaking_avatar" && t !== "speaking_practice") {
@@ -2484,7 +2510,7 @@
             const incomplete =
               steps.find((s) => {
                 const txt = (s.innerText || s.textContent || "").toLowerCase();
-                const cls = (s.className || "").toLowerCase();
+                const cls = getClassName(s).toLowerCase();
                 return (
                   !cls.includes("completed") &&
                   !cls.includes("passed") &&
@@ -2493,8 +2519,6 @@
                 );
               }) || null;
             if (incomplete) {
-              const target = incomplete.querySelector(".content, .step, div") || incomplete;
-              await simulateClick(target);
               await simulateClick(incomplete);
               clickedTarget = "lesson-overview-step";
               break;
@@ -2503,8 +2527,8 @@
         }
       }
 
-      // Priority 3: Optional speaking task with SKIP button on step 0 when 'next' is explicitly invoked
-      if (!clickedTarget && step === 0) {
+      // Priority 3: Optional speaking task with SKIP button on step 0 when 'next' is explicitly invoked (never on Progress Test)
+      if (!clickedTarget && step === 0 && !st.isProgressTest) {
         const skipEl = st.elements.find((e) => e.type === "skip_btn" && !e.disabled);
         if (skipEl) {
           const domSkip = resolveElement(skipEl.id);
@@ -2882,7 +2906,14 @@
       }
 
       // Click microphone button to start recording (runs directly in main page JS world)
-      await callVoiceBridge({ type: "click", selector: "button.audio-recorder-btn" });
+      const micEfId = micEl.getAttribute("data-efekta-id") || "";
+      const micSelector = micEfId
+        ? `[data-efekta-id="${micEfId}"]`
+        : "button.audio-recorder-btn, [data-qa='audio-record-or-play']";
+      const startClickRes = await callVoiceBridge({ type: "click", selector: micSelector });
+      if (!startClickRes || !startClickRes.ok) {
+        await simulateClick(micEl);
+      }
       log.push(`Started speaking (${preparedClip.source}, ${clipDurMs}ms)...`);
 
       // Wait while phrase plays into Efekta's audio stream
@@ -2919,7 +2950,7 @@
           for (const b of btns) {
             const aria = (b.getAttribute("aria-label") || "").toLowerCase();
             const txt = (b.innerText || "").toLowerCase();
-            const cls = (b.className || "").toLowerCase();
+            const cls = getClassName(b).toLowerCase();
             if (
               aria.includes("recording") ||
               txt.includes("recording") ||
@@ -2934,7 +2965,14 @@
           if (recBtn) break;
         }
         if (isRecording && recBtn) {
-          await callVoiceBridge({ type: "click", selector: "button.audio-recorder-btn" });
+          const recEfId = recBtn.getAttribute("data-efekta-id") || "";
+          const stopSelector = recEfId
+            ? `[data-efekta-id="${recEfId}"]`
+            : "button.audio-recorder-btn, [data-qa='audio-record-or-play']";
+          const stopClickRes = await callVoiceBridge({ type: "click", selector: stopSelector });
+          if (!stopClickRes || !stopClickRes.ok) {
+            await simulateClick(recBtn);
+          }
           log.push("Clicked mic button once to stop recording");
         }
       } else {
@@ -2947,6 +2985,7 @@
         await sleep(200);
         let isWaiting = false;
         let isCorrect = false;
+        let isIncorrect = false;
         for (const doc of docs) {
           if (doc.querySelector(".speech-action-control.waiting_for_assessment")) {
             isWaiting = true;
@@ -2957,6 +2996,9 @@
             )
           ) {
             isCorrect = true;
+          }
+          if (doc.querySelector(".speech-action-control.incorrect")) {
+            isIncorrect = true;
           }
         }
         const afterSt = inspectState();
@@ -2972,7 +3014,9 @@
               log
             };
           }
-          break;
+          if (isIncorrect || Date.now() - gradeStart >= 1000) {
+            break;
+          }
         }
       }
 
@@ -3054,6 +3098,13 @@
     };
   }
 
+  // True when nextButtonId is an unsubmitted Check/Submit button rather than a post-answer Next button
+  function isCheckOrSubmitButton(st) {
+    if (!st || !st.nextButtonId || !Array.isArray(st.elements)) return false;
+    const btn = st.elements.find((e) => e.id === st.nextButtonId);
+    return !!(btn && /\b(check|submit|проверить)\b/i.test(btn.text || ""));
+  }
+
   // Solver 1: Multiple Choice Smart Solver (Single & Multi-Select with Instant Incorrect Abort)
   async function solveMultipleChoice(delayMs = 100) {
     if (isProgressTest()) {
@@ -3105,7 +3156,7 @@
       while (Date.now() - waitStart < Math.max(delayMs, 220)) {
         await sleep(30);
         const checkSt = inspectState();
-        if (checkSt.canProceed && !checkSt.feedback.startsWith("incorrect")) {
+        if (checkSt.canProceed && !isCheckOrSubmitButton(checkSt) && !checkSt.feedback.startsWith("incorrect")) {
           return {
             success: true,
             message: `Unlocked progression with ${meta.id} ("${text}")`,
@@ -3148,9 +3199,19 @@
         const checkEl = resolveElement(checkBtn.id);
         if (checkEl) {
           await simulateClick(checkEl);
-          await sleep(60);
+          await sleep(80);
           const afterCheck = inspectState();
-          if (afterCheck.canProceed && !afterCheck.feedback.startsWith("incorrect")) {
+          const elAfter = resolveElement(meta.id) || targetEl;
+          const markedInc = elAfter && (
+            elAfter.classList.contains("incorrect") ||
+            (elAfter.closest && elAfter.closest(".incorrect"))
+          );
+          if (
+            afterCheck.canProceed &&
+            !isCheckOrSubmitButton(afterCheck) &&
+            !markedInc &&
+            !afterCheck.feedback.startsWith("incorrect")
+          ) {
             return {
               success: true,
               message: `Unlocked progression with ${meta.id} ("${text}")`,
@@ -3163,7 +3224,7 @@
     }
 
     const finalState = inspectState();
-    if (finalState.canProceed) {
+    if (finalState.canProceed && !isCheckOrSubmitButton(finalState) && !finalState.feedback.startsWith("incorrect")) {
       return { success: true, message: "Completed options and unlocked progression", nextButtonId: finalState.nextButtonId, clicked };
     }
 
@@ -3209,7 +3270,7 @@
             await sleep(40);
           }
           const stAfter = inspectState();
-          if (stAfter.canProceed && !stAfter.feedback.startsWith("incorrect")) {
+          if (stAfter.canProceed && !isCheckOrSubmitButton(stAfter) && !stAfter.feedback.startsWith("incorrect")) {
             return {
               success: true,
               message: `Unlocked multi-select progression with combo [${combo.map(i => candidates[i].text).join(", ")}]`,
@@ -3222,9 +3283,9 @@
             const chkEl = resolveElement(chk.id);
             if (chkEl) {
               await simulateClick(chkEl);
-              await sleep(60);
+              await sleep(80);
               const postChk = inspectState();
-              if (postChk.canProceed && !postChk.feedback.startsWith("incorrect")) {
+              if (postChk.canProceed && !isCheckOrSubmitButton(postChk) && !postChk.feedback.startsWith("incorrect")) {
                 return {
                   success: true,
                   message: `Unlocked multi-select progression with combo [${combo.map(i => candidates[i].text).join(", ")}]`,
@@ -3243,9 +3304,10 @@
     }
 
     const postState = inspectState();
+    const solved = postState.canProceed && !isCheckOrSubmitButton(postState) && !postState.feedback.startsWith("incorrect");
     return {
-      success: postState.canProceed,
-      message: postState.canProceed
+      success: solved,
+      message: solved
         ? "Completed options and unlocked progression"
         : "Tested choice options; inspect state for multi-select",
       clicked
@@ -3547,6 +3609,7 @@
     const turns = [];
     let scenario = "";
     let retries = 0;
+    let emptyOptPolls = 0;
     const t0 = Date.now();
 
     for (let guard = 0; guard < 60 && Date.now() - t0 < 270000; guard++) {
@@ -3591,18 +3654,32 @@
       if (st.canProceed && st.nextButtonId) {
         const b = resolveElement(st.nextButtonId);
         if (b) {
+          emptyOptPolls = 0;
           await simulateClick(b);
           await sleep(500);
           continue;
         }
       }
 
-      // 2. If no response options are visible yet, wait briefly for turn to load
+      // 2. If no response options are visible yet, wait briefly for turn to load (with bounded timeout!)
       if (opts.length === 0) {
+        emptyOptPolls++;
+        const waitingForMedia = !!(media.isPlaying || (media.hasVideo && !media.ended));
+        const inAvatar = isAvatarContext(st);
+        const maxEmptyPolls = waitingForMedia ? 150 : inAvatar ? 45 : 8;
+        if (emptyOptPolls >= maxEmptyPolls) {
+          return {
+            success: false,
+            error: "No dialogue response options appeared on page",
+            message: "No dialogue response options appeared on page",
+            turns
+          };
+        }
         await sleep(350);
-        guard = Math.max(0, guard - 1); // Do not consume turn attempt guard while waiting for avatar video/turn to render
+        guard = Math.max(0, guard - 1);
         continue;
       }
+      emptyOptPolls = 0;
 
       // Pick option for this turn
       const want = picks[turns.length];
@@ -3761,15 +3838,20 @@
     await simulateType(textarea, essayText);
     await sleep(350);
 
+    let submitted = false;
     const stAfter = inspectState();
     if (stAfter.canProceed && stAfter.nextButtonId) {
       const btn = resolveElement(stAfter.nextButtonId);
-      if (btn) await simulateClick(btn);
+      if (btn) {
+        await simulateClick(btn);
+        submitted = true;
+      }
     } else {
       for (const doc of docs) {
         const btn = doc.querySelector("button.next-task-button, button.check-task-button");
         if (btn && isVisible(btn) && !btn.disabled) {
           await simulateClick(btn);
+          submitted = true;
           break;
         }
       }
@@ -3778,6 +3860,13 @@
 
     const postNext = await executeAutoNext(5);
     const wordCount = essayText.split(/\s+/).filter(Boolean).length;
+    if (!submitted && !(postNext && postNext.success)) {
+      return {
+        success: false,
+        error: `Typed essay (${wordCount} words) but Submit/Next button remained disabled`,
+        wordCount
+      };
+    }
     return {
       success: true,
       message: `Completed and submitted essay (${wordCount} words) and advanced through self-evaluation`,
@@ -3823,20 +3912,27 @@
       } else if (raw.includes(",") && poolTexts.every((t) => !t.includes(","))) {
         targetTokens = raw.split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
       } else if (hasMultiWordButtons) {
-        // Greedily match available pool buttons against the sentence text from left to right!
+        // Greedily match available pool buttons (multiset by index, supporting duplicate tokens) from left to right!
+        const remainingPool = poolTexts.slice();
         let rem = raw.replace(/\s+/g, " ");
         while (rem.trim().length > 0) {
-          const avail = poolTexts.filter((t) => !targetTokens.includes(t));
-          avail.sort((a, b) => b.length - a.length);
-          const found = avail.find((t) => {
+          const indexed = remainingPool.map((t, idx) => ({ t, idx })).sort((a, b) => b.t.length - a.t.length);
+          const nr = rem.toLowerCase().replace(/['’`]/g, "'");
+          const nrTrimmed = nr.replace(/^[,.?!:;\s]+/, "");
+          const leadingOffset = nr.length - nrTrimmed.length;
+          const match = indexed.find(({ t }) => {
             const nt = t.toLowerCase().replace(/['’`]/g, "'");
-            const nr = rem.toLowerCase().replace(/['’`]/g, "'");
-            return nr.startsWith(nt) || nr.replace(/^[,.?!:;\s]+/, "").startsWith(nt.replace(/^[,.?!:;\s]+/, ""));
+            const ntTrimmed = nt.replace(/^[,.?!:;\s]+/, "");
+            return nt.length > 0 && (nr.startsWith(nt) || (ntTrimmed.length > 0 && nrTrimmed.startsWith(ntTrimmed)));
           });
-          if (found) {
-            targetTokens.push(found);
-            const idx = rem.toLowerCase().indexOf(found.toLowerCase());
-            rem = (idx !== -1 ? rem.slice(idx + found.length) : rem.slice(found.length)).trim();
+          if (match) {
+            targetTokens.push(match.t);
+            remainingPool.splice(match.idx, 1);
+            const nt = match.t.toLowerCase().replace(/['’`]/g, "'");
+            const sliceLen = nr.startsWith(nt)
+              ? nt.length
+              : leadingOffset + nt.replace(/^[,.?!:;\s]+/, "").length;
+            rem = rem.slice(sliceLen).trim();
           } else {
             const m = rem.match(/^\S+/);
             if (m) {
@@ -3864,12 +3960,16 @@
       await waitUntilUnlocked(600);
       const poolButtons = Array.from(unorderedList.querySelectorAll("button.item, button")).filter(isVisible);
       const cleanTarget = norm(token);
+      const cleanTargetNoPunct = normNoPunct(token);
       const matchBtn =
-        poolButtons.find((b) => norm(cleanText(b)) === cleanTarget) ||
-        poolButtons.find((b) => normNoPunct(cleanText(b)) === normNoPunct(cleanTarget)) ||
-        poolButtons.find((b) => cleanTarget.includes(norm(cleanText(b)))) ||
-        poolButtons.find((b) => norm(cleanText(b)).includes(cleanTarget)) ||
-        poolButtons.find((b) => b.getAttribute("data-efekta-id") === token);
+        poolButtons.find((b) => b.getAttribute("data-efekta-id") === token) ||
+        (cleanTarget && poolButtons.find((b) => norm(cleanText(b)) === cleanTarget)) ||
+        (cleanTargetNoPunct && poolButtons.find((b) => normNoPunct(cleanText(b)) === cleanTargetNoPunct)) ||
+        (cleanTarget && poolButtons.find((b) => {
+          const bt = norm(cleanText(b));
+          return bt.length > 0 && cleanTarget.includes(bt);
+        })) ||
+        (cleanTarget && poolButtons.find((b) => norm(cleanText(b)).includes(cleanTarget)));
 
       if (matchBtn) {
         await simulateClick(matchBtn);
@@ -3930,6 +4030,17 @@
       }
       emptyWaits = 0;
 
+      const t = st.exerciseType;
+
+      // PROGRESS TEST SAFEGUARD: never run ANY autonomous solver or skip on a graded Progress Test!
+      if (st.isProgressTest && isInteractiveExercise(st)) {
+        return finish({
+          needsAgent: true,
+          stoppedAt: t === "multiple_choice" ? "progress_test_choice" : t,
+          message: `Progress Test detected (${t}): autopilot stopped to preserve exam score. Answer manually using agentHint.actionTemplate.`
+        });
+      }
+
       if (isAvatarContext(st)) {
         const r = await executeDialogue("");
         steps.push(`dialogue: ${r.message}`);
@@ -3937,7 +4048,6 @@
         continue;
       }
 
-      const t = st.exerciseType;
       if (t === "speaking_practice") {
         const skip = !speakDrills ? findSkipButtonEl() : null;
         if (skip) {
@@ -3953,7 +4063,7 @@
         continue;
       }
 
-      if (t === "progress_test_choice" || (isProgressTest() && t === "multiple_choice")) {
+      if (t === "progress_test_choice") {
         return finish({
           needsAgent: true,
           stoppedAt: "progress_test_choice",
@@ -4124,9 +4234,10 @@
       await sleep(400);
     }
 
-    // 2. If on /gap/ui/home, navigate to /gap/ui/self-study
+    // 2. If on /gap/ui/home, navigate to /gap/ui/self-study (or resume active lesson directly)
     if (window.location.pathname.includes("/home")) {
       const docs = getAllDocs();
+      let resumedDirectly = false;
       for (const doc of docs) {
         if (query === "resume") {
           const continueBtn = Array.from(doc.querySelectorAll("button, a")).find(
@@ -4134,6 +4245,7 @@
           );
           if (continueBtn) {
             await simulateClick(continueBtn);
+            resumedDirectly = true;
             break;
           }
         }
@@ -4146,6 +4258,33 @@
           await simulateClick(studyLink);
           break;
         }
+      }
+      if (resumedDirectly) {
+        const navStart = Date.now();
+        let mounted = false;
+        while (Date.now() - navStart < 6000) {
+          await sleep(250);
+          if (
+            window.location.pathname.includes("/lesson-view") ||
+            getAllDocs().some((d) =>
+              d.querySelector("ef-lesson-player, .lesson-header, ef-lesson-overview, ef-activity")
+            )
+          ) {
+            mounted = true;
+            break;
+          }
+        }
+        if (mounted) {
+          await sleep(400);
+          await executeAutoNext(4);
+        }
+        let st = inspectState();
+        st = await autoPeekSelectionGapOptions(st);
+        return {
+          success: true,
+          message: "Resumed active lesson from home",
+          data: st
+        };
       }
       const waitStart = Date.now();
       while (Date.now() - waitStart < 5000) {
@@ -4212,7 +4351,7 @@
                 linkEl.querySelector("div[class*='rounded-full'], svg[data-icon='lock']") !== null;
 
               const isCompleted =
-                linkEl.innerText.includes("100%") ||
+                (linkEl.innerText || "").includes("100%") ||
                 linkEl.querySelector("[data-icon='check'], .is-passed, .completed") !== null ||
                 aria.toLowerCase().includes("completed");
 
@@ -4243,7 +4382,8 @@
           if (testEl) {
             const testBtn = testEl.querySelector("button, a, div[role='button']");
             const testLocked =
-              testEl.innerText.includes("locked") || testBtn?.getAttribute("aria-disabled") === "true";
+              (testEl.innerText || "").toLowerCase().includes("locked") ||
+              testBtn?.getAttribute("aria-disabled") === "true";
             testCard = {
               title: "Take the final test",
               code: "TEST",
@@ -4327,8 +4467,8 @@
       if (!target && testCard && testCard.status === "available") {
         target = testCard;
       }
-    } else if (/^u?(\d+)[._\-l](\d+)$/i.test(query)) {
-      const m = query.match(/^u?(\d+)[._\-l](\d+)$/i);
+    } else if (/^(?:unit|u)?\s*(\d+)\s*(?:[._\-]|lesson|l)\s*(\d+)$/i.test(query)) {
+      const m = query.match(/^(?:unit|u)?\s*(\d+)\s*(?:[._\-]|lesson|l)\s*(\d+)$/i);
       const reqU = parseInt(m[1], 10);
       const reqL = parseInt(m[2], 10);
       const u = units.find((x) => x.unit === reqU);
@@ -4590,21 +4730,27 @@
         };
       }
       case "eval": {
-        const rawTarget = cmd.target || "body";
+        const rawTarget = String(cmd.target || "body").trim();
+        const lowerTarget = rawTarget.toLowerCase();
         const docs = getAllDocs();
 
-        if (rawTarget.startsWith("page:") || rawTarget.startsWith("js:")) {
+        if (lowerTarget.startsWith("page:") || lowerTarget.startsWith("js:")) {
           return {
             success: false,
-            error: "Arbitrary JavaScript eval is disabled; pass a CSS selector, 'info:<sel>', 'click:<sel>', or 'all:<sel>'"
+            error: "Arbitrary JavaScript eval is disabled; pass a CSS selector, 'info:<sel>', or 'click:<sel>'"
           };
         }
 
-        if (rawTarget.startsWith("info:")) {
+        if (lowerTarget.startsWith("info:")) {
           const sel = rawTarget.slice(5).trim();
           const infos = [];
           for (const doc of docs) {
-            const elements = Array.from(doc.querySelectorAll(sel));
+            let elements = [];
+            try {
+              elements = Array.from(doc.querySelectorAll(sel));
+            } catch (e) {
+              return { success: false, error: `Invalid CSS selector: ${sel}` };
+            }
             for (const el of elements.slice(0, 10)) {
               const rect = el.getBoundingClientRect();
               const win = (el.ownerDocument && el.ownerDocument.defaultView) || window;
@@ -4612,16 +4758,16 @@
               infos.push({
                 tag: el.tagName.toLowerCase(),
                 id: el.getAttribute("data-efekta-id") || el.id || "",
-                className: el.className || "",
+                className: getClassName(el),
                 text: cleanText(el),
                 value: el.value !== undefined ? el.value : "",
-                parent: el.parentElement ? el.parentElement.tagName.toLowerCase() + " " + el.parentElement.className : "",
+                parent: el.parentElement ? el.parentElement.tagName.toLowerCase() + " " + getClassName(el.parentElement) : "",
                 visible: isVisible(el),
                 display: cs.display,
                 cursor: cs.cursor,
                 pointerEvents: cs.pointerEvents,
                 rect: { x: Math.round(rect.left), y: Math.round(rect.top), w: Math.round(rect.width), h: Math.round(rect.height) },
-                html: el.outerHTML.slice(0, 400),
+                html: String(el.outerHTML || "").slice(0, 400),
                 childrenCount: el.children.length
               });
             }
@@ -4629,12 +4775,17 @@
           return { success: true, data: infos };
         }
 
-        if (rawTarget.startsWith("click:")) {
+        if (lowerTarget.startsWith("click:")) {
           const sel = rawTarget.slice(6).trim();
           for (const doc of docs) {
-            const el = doc.querySelector(sel);
+            let el = null;
+            try {
+              el = doc.querySelector(sel);
+            } catch (e) {
+              return { success: false, error: `Invalid CSS selector: ${sel}` };
+            }
             if (el) {
-              const res = await simulateClick(el);
+              await simulateClick(el);
               return { success: true, message: `Clicked ${sel}`, clicked: true, tag: el.tagName };
             }
           }
@@ -4677,6 +4828,14 @@
     (async () => {
       try {
         if (request.action === "batch") {
+          const commands = Array.isArray(request.commands) ? request.commands : [];
+          if (commands.length === 0) {
+            sendResponse({
+              success: false,
+              error: "Batch command list is empty"
+            });
+            return;
+          }
           // Take upfront pre-batch snapshot so consecutive sort/pick/pair commands never suffer from DOM ID shifts!
           inspectState();
           batchElementSnapshot.clear();
@@ -4687,7 +4846,6 @@
 
           const results = [];
           const autoReadNotes = [];
-          const commands = request.commands || [];
           try {
             for (const sub of commands) {
               const r = await executeSingleCommand(sub);
