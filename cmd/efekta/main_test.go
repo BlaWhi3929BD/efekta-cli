@@ -1,7 +1,12 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"efekta-cli/pkg/protocol"
 )
 
 func TestParseBatchString(t *testing.T) {
@@ -105,6 +110,11 @@ func TestJoinCLIArgs(t *testing.T) {
 			args: []string{`sequence 'hi`},
 			want: `sequence 'hi`,
 		},
+		{
+			name: "preserves multiple quoted args",
+			args: []string{`"a, b", "c, d"`},
+			want: `"a, b", "c, d"`,
+		},
 	}
 
 	for _, tc := range tests {
@@ -113,5 +123,61 @@ func TestJoinCLIArgs(t *testing.T) {
 				t.Errorf("joinCLIArgs(%q) = %q, want %q", tc.args, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseScrollArgs(t *testing.T) {
+	tests := []struct {
+		args    []string
+		wantDir string
+		wantAmt int
+	}{
+		{nil, "down", 400},
+		{[]string{"up"}, "up", 400},
+		{[]string{"UP", "650"}, "up", 650},
+		{[]string{"down", "250"}, "down", 250},
+		{[]string{"-300"}, "down", -300},
+		{[]string{"800"}, "down", 800},
+	}
+	for _, tc := range tests {
+		dir, amt := parseScrollArgs(tc.args)
+		if dir != tc.wantDir || amt != tc.wantAmt {
+			t.Errorf("parseScrollArgs(%v) = (%q, %d), want (%q, %d)", tc.args, dir, amt, tc.wantDir, tc.wantAmt)
+		}
+	}
+}
+
+func TestCheckDaemonHealthRejectsNonDaemon200(t *testing.T) {
+	// Unrelated server serving 200 HTML must NOT pass daemon health check
+	htmlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("<html>Not Efekta</html>"))
+	}))
+	defer htmlSrv.Close()
+	if _, ok := checkDaemonHealth(htmlSrv.URL); ok {
+		t.Error("expected HTML 200 response to fail daemon health check")
+	}
+
+	// Valid efekta daemon JSON response must pass
+	okSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"running","browserConnected":true}`))
+	}))
+	defer okSrv.Close()
+	data, ok := checkDaemonHealth(okSrv.URL)
+	if !ok || data["browserConnected"] != true {
+		t.Errorf("expected valid daemon health response to pass, got ok=%v data=%v", ok, data)
+	}
+}
+
+func TestSendCommandHTTPReportsHTTPErrorStatus(t *testing.T) {
+	errSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "Forbidden host", http.StatusForbidden)
+	}))
+	defer errSrv.Close()
+
+	_, err := sendCommandHTTP(errSrv.URL, protocol.Command{Action: "status"})
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "Forbidden host") {
+		t.Fatalf("expected HTTP 403 error message, got: %v", err)
 	}
 }

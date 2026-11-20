@@ -2,13 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -23,30 +24,69 @@ const (
 	HealthURL = "http://127.0.0.1:8765/api/health"
 )
 
-var localHTTPClient = &http.Client{
-	Transport: &http.Transport{},
+var (
+	localHTTPTransport = &http.Transport{}
+	healthHTTPClient   = &http.Client{
+		Timeout:   2 * time.Second,
+		Transport: localHTTPTransport,
+	}
+	localHTTPClient = &http.Client{
+		Transport: localHTTPTransport,
+	}
+)
+
+func checkDaemonHealth(healthURL string) (map[string]interface{}, bool) {
+	resp, err := healthHTTPClient.Get(healthURL)
+	if err != nil {
+		return nil, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, false
+	}
+	var data map[string]interface{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64*1024)).Decode(&data); err != nil {
+		return nil, false
+	}
+	if status, _ := data["status"].(string); status != "running" {
+		return nil, false
+	}
+	if _, hasConn := data["browserConnected"]; !hasConn {
+		return nil, false
+	}
+	return data, true
 }
 
 func isDaemonRunning() bool {
-	resp, err := localHTTPClient.Get(HealthURL)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
+	_, ok := checkDaemonHealth(HealthURL)
+	return ok
 }
 
-// joinCLIArgs joins trailing positional CLI arguments and trims matching outer
-// quotes passed verbatim by shells such as Windows cmd.exe.
+// joinCLIArgs joins trailing positional CLI arguments and trims a single matching
+// pair of outer quotes passed verbatim by shells such as Windows cmd.exe.
 func joinCLIArgs(args []string) string {
 	joined := strings.TrimSpace(strings.Join(args, " "))
-	if len(joined) >= 2 {
-		if (joined[0] == '\'' && joined[len(joined)-1] == '\'') ||
-			(joined[0] == '"' && joined[len(joined)-1] == '"') {
-			return strings.TrimSpace(joined[1 : len(joined)-1])
-		}
+	return protocol.UnwrapMatchingQuotes(joined)
+}
+
+func parseScrollArgs(args []string) (string, int) {
+	direction := "down"
+	amount := 400
+	if len(args) == 0 {
+		return direction, amount
 	}
-	return joined
+	first := strings.ToLower(strings.TrimSpace(args[0]))
+	if first == "up" || first == "down" {
+		direction = first
+		if len(args) >= 2 {
+			if num, err := strconv.Atoi(strings.TrimSpace(args[1])); err == nil {
+				amount = num
+			}
+		}
+	} else if num, err := strconv.Atoi(first); err == nil {
+		amount = num
+	}
+	return direction, amount
 }
 
 func readDaemonLogTail(logPath string) string {
@@ -71,7 +111,7 @@ func ensureDaemon() error {
 		exePath = "efekta"
 	}
 
-	logPath := filepath.Join(os.TempDir(), "efekta-daemon.log")
+	logPath := daemon.GetLogFilePath()
 	logFile, logErr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 
 	cmd := exec.Command(exePath, "daemon", "run")
@@ -96,7 +136,7 @@ func ensureDaemon() error {
 		waitCh <- cmd.Wait()
 	}()
 
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 40; i++ {
 		select {
 		case waitErr := <-waitCh:
 			if isDaemonRunning() {
@@ -118,17 +158,16 @@ func ensureDaemon() error {
 	return fmt.Errorf("daemon started (pid: %d) but health check timed out (log: %s)", cmd.Process.Pid, logPath)
 }
 
-func execCommand(cmd protocol.Command) (*protocol.Response, error) {
-	if err := ensureDaemon(); err != nil {
-		return nil, err
-	}
-
+func sendCommandHTTP(apiURL string, cmd protocol.Command) (*protocol.Response, error) {
 	bodyBytes, err := json.Marshal(cmd)
 	if err != nil {
 		return nil, err
 	}
 
-	req, err := http.NewRequest(http.MethodPost, ApiURL, bytes.NewReader(bodyBytes))
+	ctx, cancel := context.WithTimeout(context.Background(), daemon.CommandTimeout(cmd)+15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
@@ -141,12 +180,28 @@ func execCommand(cmd protocol.Command) (*protocol.Response, error) {
 	}
 	defer httpResp.Body.Close()
 
+	if httpResp.StatusCode != http.StatusOK {
+		errBody, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
+		msg := strings.TrimSpace(string(errBody))
+		if msg == "" {
+			msg = httpResp.Status
+		}
+		return nil, fmt.Errorf("daemon returned HTTP %d: %s", httpResp.StatusCode, msg)
+	}
+
 	var resp protocol.Response
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		return nil, fmt.Errorf("failed to parse daemon response: %w", err)
 	}
 
 	return &resp, nil
+}
+
+func execCommand(cmd protocol.Command) (*protocol.Response, error) {
+	if err := ensureDaemon(); err != nil {
+		return nil, err
+	}
+	return sendCommandHTTP(ApiURL, cmd)
 }
 
 // ParseBatchString parses a semicolon-separated chain of commands into BatchSubCommands.
@@ -358,7 +413,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta pick <opt-1,opt-2,...>")
 			os.Exit(1)
 		}
-		target := strings.Join(posArgs[1:], " ")
+		target := joinCLIArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "pick", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -368,7 +423,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta pair \"slot-1:item-3, slot-2:item-1\"")
 			os.Exit(1)
 		}
-		target := strings.Join(posArgs[1:], " ")
+		target := joinCLIArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "pair", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -378,7 +433,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta sort \"slot-1:item-1,item-2 | slot-2:item-3,item-4\"")
 			os.Exit(1)
 		}
-		target := strings.Join(posArgs[1:], " ")
+		target := joinCLIArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "sort", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -388,7 +443,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta gaps \"word1, word2, word3\"")
 			os.Exit(1)
 		}
-		target := strings.Join(posArgs[1:], " ")
+		target := joinCLIArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "gaps", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -396,7 +451,7 @@ func main() {
 	case "speak", "say":
 		target := "all"
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "speak", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -405,7 +460,7 @@ func main() {
 	case "dialogue", "avatar":
 		target := ""
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "dialogue", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -419,7 +474,7 @@ func main() {
 	case "auto", "autopilot":
 		target := ""
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "autopilot", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -428,7 +483,7 @@ func main() {
 	case "essay", "write":
 		target := "auto"
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "essay", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -437,7 +492,7 @@ func main() {
 	case "sequence":
 		target := "auto"
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "sequence", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -446,7 +501,7 @@ func main() {
 	case "lesson", "unit":
 		target := "next"
 		if len(posArgs) >= 2 {
-			target = strings.Join(posArgs[1:], " ")
+			target = joinCLIArgs(posArgs[1:])
 		}
 		resp, err := execCommand(protocol.Command{Action: "lesson", Target: target})
 		applyCompactFilter(resp, compactOutput)
@@ -474,7 +529,13 @@ func main() {
 			handleSimpleResponse(resp, err, jsonOutput)
 		default:
 			_, _ = execCommand(protocol.Command{Action: "reload_extension"})
-			time.Sleep(700 * time.Millisecond)
+			time.Sleep(400 * time.Millisecond)
+			for i := 0; i < 20; i++ {
+				if data, ok := checkDaemonHealth(HealthURL); ok && data["browserConnected"] == true {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
 			resp, err := execCommand(protocol.Command{Action: "reload_tab"})
 			handleSimpleResponse(resp, err, jsonOutput)
 		}
@@ -484,7 +545,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta click <id|id1,id2|selector|x,y>")
 			os.Exit(1)
 		}
-		target := strings.Join(posArgs[1:], " ")
+		target := joinCLIArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "click", Target: target})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -503,7 +564,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "Usage: efekta type <target_id> <text>")
 			os.Exit(1)
 		}
-		text := strings.Join(posArgs[2:], " ")
+		text := joinCLIArgs(posArgs[2:])
 		resp, err := execCommand(protocol.Command{Action: "type", Target: posArgs[1], Text: text})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -518,16 +579,7 @@ func main() {
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "scroll":
-		direction := "down"
-		amount := 400
-		if len(posArgs) >= 2 {
-			arg := posArgs[1]
-			if arg == "up" || arg == "down" {
-				direction = arg
-			} else if num, err := strconv.Atoi(arg); err == nil {
-				amount = num
-			}
-		}
+		direction, amount := parseScrollArgs(posArgs[1:])
 		resp, err := execCommand(protocol.Command{Action: "scroll", Direction: direction, Amount: amount})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -552,7 +604,11 @@ func main() {
 	case "screen", "screenshot":
 		outputPath := "screenshot.png"
 		for i := 1; i < len(os.Args); i++ {
-			if (os.Args[i] == "-o" || os.Args[i] == "--output") && i+1 < len(os.Args) {
+			if os.Args[i] == "-o" || os.Args[i] == "--output" {
+				if i+1 >= len(os.Args) {
+					outputError(fmt.Errorf("flag %s requires an output file path", os.Args[i]), jsonOutput)
+					os.Exit(1)
+				}
 				outputPath = os.Args[i+1]
 				break
 			}
@@ -568,19 +624,22 @@ func main() {
 		}
 
 		dataMap, ok := resp.Data.(map[string]interface{})
-		if !ok || dataMap["screenshotBase64"] == nil {
+		if !ok {
 			outputError(fmt.Errorf("no screenshot data returned"), jsonOutput)
 			os.Exit(1)
 		}
-
-		b64Str := dataMap["screenshotBase64"].(string)
+		b64Str, ok := dataMap["screenshotBase64"].(string)
+		if !ok || b64Str == "" {
+			outputError(fmt.Errorf("no screenshot data returned"), jsonOutput)
+			os.Exit(1)
+		}
 		imgBytes, err := base64.StdEncoding.DecodeString(b64Str)
 		if err != nil {
 			outputError(err, jsonOutput)
 			os.Exit(1)
 		}
 
-		if err := os.WriteFile(outputPath, imgBytes, 0644); err != nil {
+		if err := os.WriteFile(outputPath, imgBytes, 0600); err != nil {
 			outputError(err, jsonOutput)
 			os.Exit(1)
 		}
@@ -597,6 +656,10 @@ func main() {
 			os.Exit(1)
 		}
 		subCmds := ParseBatchString(joinCLIArgs(posArgs[1:]))
+		if len(subCmds) == 0 {
+			outputError(fmt.Errorf("no valid commands parsed from batch string"), jsonOutput)
+			os.Exit(1)
+		}
 		resp, err := execCommand(protocol.Command{Action: "batch", Commands: subCmds})
 		applyCompactFilter(resp, compactOutput)
 		handleSimpleResponse(resp, err, jsonOutput)
@@ -613,7 +676,7 @@ func main() {
 			action = "solve_choice"
 		case "sentence", "order":
 			action = "solve_sentence"
-		case "speak", "voice", "dialog":
+		case "speak", "voice", "dialog", "skip":
 			action = "skip_speaking"
 		default:
 			outputError(fmt.Errorf("unknown solve strategy: %s. Valid: choice | sentence | speak", strategy), jsonOutput)
@@ -631,7 +694,7 @@ func main() {
 }
 
 func handleDaemonCmd(subCmd string, jsonOut bool) {
-	switch subCmd {
+	switch strings.ToLower(subCmd) {
 	case "run":
 		srv := daemon.NewServer()
 		if err := srv.Run(); err != nil {
@@ -640,8 +703,8 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 		}
 
 	case "status":
-		resp, err := localHTTPClient.Get(HealthURL)
-		if err != nil {
+		data, ok := checkDaemonHealth(HealthURL)
+		if !ok {
 			if jsonOut {
 				printJSON(map[string]interface{}{"status": "stopped", "browserConnected": false})
 			} else {
@@ -649,9 +712,6 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 			}
 			return
 		}
-		defer resp.Body.Close()
-		var data map[string]interface{}
-		_ = json.NewDecoder(resp.Body).Decode(&data)
 		if jsonOut {
 			printJSON(data)
 			return
@@ -668,27 +728,48 @@ func handleDaemonCmd(subCmd string, jsonOut bool) {
 	case "stop":
 		pidBytes, err := os.ReadFile(daemon.GetPIDFilePath())
 		if err != nil {
-			fmt.Println("Daemon PID file not found, may already be stopped.")
+			if jsonOut {
+				printJSON(map[string]interface{}{"success": true, "status": "already_stopped", "message": "Daemon PID file not found, may already be stopped."})
+			} else {
+				fmt.Println("Daemon PID file not found, may already be stopped.")
+			}
 			return
 		}
 		if !isDaemonRunning() {
 			daemon.RemovePID()
-			fmt.Println("Daemon was not running (cleaned up stale PID file).")
+			if jsonOut {
+				printJSON(map[string]interface{}{"success": true, "status": "cleaned_stale_pid", "message": "Daemon was not running (cleaned up stale PID file)."})
+			} else {
+				fmt.Println("Daemon was not running (cleaned up stale PID file).")
+			}
 			return
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(string(pidBytes)))
 		if err != nil {
 			daemon.RemovePID()
-			fmt.Println("Invalid PID in file.")
-			return
+			outputError(fmt.Errorf("invalid PID in file"), jsonOut)
+			os.Exit(1)
 		}
-		if err := terminateProcess(pid); err == nil {
-			fmt.Printf("Stopped daemon (PID %d)\n", pid)
+		if err := terminateProcess(pid); err != nil {
+			outputError(fmt.Errorf("failed to stop daemon (PID %d): %w", pid, err), jsonOut)
+			os.Exit(1)
+		}
+		for i := 0; i < 15; i++ {
+			if !isDaemonRunning() {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
 		daemon.RemovePID()
+		if jsonOut {
+			printJSON(map[string]interface{}{"success": true, "status": "stopped", "pid": pid})
+		} else {
+			fmt.Printf("Stopped daemon (PID %d)\n", pid)
+		}
 
 	default:
-		fmt.Println("Usage: efekta daemon [run|status|stop]")
+		outputError(fmt.Errorf("unknown daemon subcommand %q (usage: efekta daemon [run|status|stop])", subCmd), jsonOut)
+		os.Exit(1)
 	}
 }
 
