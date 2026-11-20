@@ -220,7 +220,7 @@
     return raw;
   }
 
-  // Wait automatically until Efekta's transient UI locks (.locked, .item-disabled) clear
+  // Wait automatically until Efekta's transient UI locks (.locked, .item-disabled, card cooldown) clear
   async function waitUntilUnlocked(maxWaitMs = 1600) {
     const start = Date.now();
     const docs = getAllDocs();
@@ -228,7 +228,9 @@
       let busy = false;
       for (const doc of docs) {
         const lockNodes = Array.from(
-          doc.querySelectorAll(".locked, .item-disabled, .matching-option-wp.disabled")
+          doc.querySelectorAll(
+            ".locked, .item-disabled, .matching-option-wp.disabled, .matching-option-wp.incorrect"
+          )
         );
         if (lockNodes.some(isVisible)) {
           busy = true;
@@ -1387,16 +1389,18 @@
         type = "drop_target";
         prefix = "slot";
       }
-      // 12. Multiple choice options & avatar speech response options (A, B, C)
+      // 12. Multiple choice options & avatar speech response options (A, B, C), excluding read-only summary badges
       else if (
-        role === "radio" ||
-        role === "checkbox" ||
-        role === "option" ||
-        tag === "ef-multiple-choice-speech-task-response-option" ||
-        cls.includes("response-option") ||
-        (cls.includes("choice") && !cls.includes("heading")) ||
-        (cls.includes("option") && !cls.includes("heading")) ||
-        /\b(answer-option|answer-item)\b/i.test(cls)
+        !cls.includes("summary-option") &&
+        !(el.closest && el.closest(".summary-wp, ef-end-of-activity-summary, .summary-shown")) &&
+        (role === "radio" ||
+          role === "checkbox" ||
+          role === "option" ||
+          tag === "ef-multiple-choice-speech-task-response-option" ||
+          cls.includes("response-option") ||
+          (cls.includes("choice") && !cls.includes("heading")) ||
+          (cls.includes("option") && !cls.includes("heading")) ||
+          /\b(answer-option|answer-item)\b/i.test(cls))
       ) {
         type = "choice";
         prefix = "opt";
@@ -2740,6 +2744,67 @@
     return false;
   }
 
+  // Scroll scrollable panels + iframe viewports so IntersectionObserver-gated reading cards unlock reliably
+  function scrollContainerElements(docs, deltaY = null) {
+    let scrolledAny = false;
+    const scrolledWindows = new Set();
+    const selector =
+      ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable'], .content, .reading-activity__content, .task-wp";
+    for (const doc of docs || getAllDocs()) {
+      const scrollables = Array.from(doc.querySelectorAll(selector));
+      const rootScroller = doc.scrollingElement || doc.documentElement;
+      if (rootScroller && !scrollables.includes(rootScroller)) scrollables.push(rootScroller);
+      if (doc.body && !scrollables.includes(doc.body)) scrollables.push(doc.body);
+
+      for (const el of scrollables) {
+        if (el.scrollHeight > el.clientHeight) {
+          if (deltaY === null) {
+            const maxTop = el.scrollHeight;
+            el.scrollTop = Math.floor(maxTop * 0.5);
+            el.dispatchEvent(new Event("scroll", { bubbles: true }));
+            el.scrollTop = maxTop;
+          } else {
+            el.scrollTop += deltaY;
+          }
+          el.dispatchEvent(new Event("scroll", { bubbles: true }));
+          scrolledAny = true;
+        }
+      }
+      const win = (doc && doc.defaultView) || null;
+      if (win && !scrolledWindows.has(win) && typeof win.scrollBy === "function") {
+        scrolledWindows.add(win);
+        try {
+          win.scrollBy({ top: deltaY === null ? 1000 : deltaY, behavior: "instant" });
+          scrolledAny = true;
+        } catch (_) {}
+      }
+    }
+    if (typeof window !== "undefined" && !scrolledWindows.has(window) && typeof window.scrollBy === "function") {
+      try {
+        window.scrollBy({ top: deltaY === null ? 1000 : deltaY, behavior: "instant" });
+      } catch (_) {}
+    }
+    return scrolledAny;
+  }
+
+  // Click Angular's overlay Play controls on passive intro/reading media cards (unlocks video_stage in ~100ms)
+  async function clickPassiveMediaControls(docs) {
+    let clickedAny = false;
+    for (const doc of docs || getAllDocs()) {
+      const mediaBtns = Array.from(
+        doc.querySelectorAll(
+          ".audio-btn, button[aria-label^='Play audio'], button[aria-label^='Play video'], button[data-qa='media-playback-control']"
+        )
+      ).filter((b) => isVisible(b) && !b.disabled);
+      for (const b of mediaBtns) {
+        await simulateClick(b);
+        await sleep(80);
+        clickedAny = true;
+      }
+    }
+    return clickedAny;
+  }
+
   // Fast-forward passive video/audio cleanly under Firefox & Chrome autoplay policies by muting before play(),
   // waiting for network Range buffering if remote src is present, with direct duration + timeupdate/ended fallback.
   async function fastForwardPassiveMedia(docs) {
@@ -2860,7 +2925,7 @@
 
       let clickedTarget = "";
 
-      // Priority 0.5: Fast-forward passive video stage if video is blocking Next button (never avatar dialogues or interactive tasks!)
+      // Priority 0.5: Unlock passive video stage immediately via Angular's overlay Play button, then fast-forward media if still locked
       const isInteractiveTask =
         st.exerciseType === "speaking_avatar" ||
         st.exerciseType === "speaking_practice" ||
@@ -2868,17 +2933,25 @@
         (st.agentHint && st.agentHint.slots && st.agentHint.slots.length > 0) ||
         (st.agentHint && st.agentHint.items && st.agentHint.items.length > 0);
 
-      if (!st.canProceed && !isInteractiveTask && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo && !st.video.ended))) {
+      if (!st.canProceed && !isInteractiveTask && (st.exerciseType === "video_stage" || (st.video && st.video.hasVideo))) {
         const docs = getAllDocs();
-        const seekCount = await fastForwardPassiveMedia(docs);
-        if (seekCount > 0) {
-          const afterSeekSt = inspectState();
-          if (afterSeekSt.nextButtonId) {
-            const btn = resolveElement(afterSeekSt.nextButtonId);
-            if (btn) {
-              await simulateClick(btn);
-              clickedTarget = afterSeekSt.nextButtonId;
-            }
+        let mediaHandled = await clickPassiveMediaControls(docs);
+        if (mediaHandled) {
+          await sleep(160);
+          st = inspectState();
+        }
+        if (!st.canProceed && (!st.video || !st.video.ended || mediaHandled)) {
+          const seekCount = await fastForwardPassiveMedia(docs);
+          if (seekCount > 0) {
+            mediaHandled = true;
+            st = inspectState();
+          }
+        }
+        if (mediaHandled && st.canProceed && st.nextButtonId) {
+          const btn = resolveElement(st.nextButtonId);
+          if (btn) {
+            await simulateClick(btn);
+            clickedTarget = st.nextButtonId;
           }
         }
       }
@@ -2911,24 +2984,11 @@
         }
       }
 
-      // Priority 1: Auto-unlock reading/presentation/intro cards by scrolling .task-area / [cdkscrollable] to bottom
+      // Priority 1: Auto-unlock reading/presentation/intro cards by scrolling containers + viewport
       if (!st.canProceed && !isInteractiveTask) {
         const docs = getAllDocs();
-        let scrolledAny = false;
-        for (const doc of docs) {
-          const scrollables = doc.querySelectorAll(
-            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable'], .content"
-          );
-          for (const el of scrollables) {
-            if (el.scrollHeight > el.clientHeight + 10) {
-              el.scrollTop = el.scrollHeight;
-              el.dispatchEvent(new Event("scroll", { bubbles: true }));
-              scrolledAny = true;
-            }
-          }
-        }
-        if (scrolledAny) {
-          await sleep(150);
+        if (scrollContainerElements(docs, null)) {
+          await sleep(180);
           st = inspectState();
         }
       }
@@ -3006,22 +3066,7 @@
       // Priority 5: Presentation/reading cards with audio/video buttons locking Next
       if (!clickedTarget && !st.canProceed) {
         const docs = getAllDocs();
-        let unlockedMedia = false;
-        const hasVideoEl = docs.some((d) => d.querySelector("video"));
-        if (!hasVideoEl) {
-          for (const doc of docs) {
-            const mediaAudioBtns = Array.from(
-              doc.querySelectorAll(".audio-btn, button[aria-label^='Play audio'], button[data-qa='media-playback-control']")
-            ).filter(isVisible);
-            if (mediaAudioBtns.length > 0) {
-              for (const b of mediaAudioBtns) {
-                await simulateClick(b);
-                await sleep(60);
-              }
-              unlockedMedia = true;
-            }
-          }
-        }
+        let unlockedMedia = await clickPassiveMediaControls(docs);
         const mediaSeeked = await fastForwardPassiveMedia(docs);
         if (mediaSeeked > 0) unlockedMedia = true;
         if (unlockedMedia) {
@@ -4053,7 +4098,7 @@
     };
   }
 
-  // Solver 5: Autonomous Categorize-Columns Solver (trials category slots per item until item commits)
+  // Solver 5: Autonomous Categorize-Columns Solver (trials category slots per item, skipping distractor items)
   async function solveCategorizeColumns() {
     if (isProgressTest()) {
       return {
@@ -4064,17 +4109,26 @@
     await dismissOverlaysIfPresent();
     const sorted = [];
     const triedByItem = new Map();
+    const exhaustedItems = new Set();
 
-    for (let guard = 0; guard < 35; guard++) {
-      await waitUntilUnlocked(1200);
+    for (let guard = 0; guard < 36; guard++) {
+      await waitUntilUnlocked(2400);
       const st = inspectState();
       if (st.canProceed && !isCheckOrSubmitButton(st)) break;
 
-      const dragEls = st.elements.filter((e) => e.type === "draggable" && !e.disabled);
-      const slotEls = st.elements.filter((e) => e.type === "drop_target");
-      if (dragEls.length === 0 || slotEls.length === 0) break;
+      const allDragEls = st.elements.filter((e) => e.type === "draggable");
+      const dragEls = allDragEls.filter((e) => !e.disabled);
+      const slotEls = st.elements.filter((e) => e.type === "drop_target" && !e.disabled);
+      if (dragEls.length === 0 || slotEls.length === 0) {
+        if (allDragEls.some((e) => e.disabled)) {
+          await sleep(250);
+          continue;
+        }
+        break;
+      }
 
-      const itemMeta = dragEls[0];
+      const itemMeta = dragEls.find((e) => !exhaustedItems.has(e.text || e.id)) || null;
+      if (!itemMeta) break;
       const itemEl = resolveElement(itemMeta.id);
       if (!itemEl) break;
 
@@ -4083,10 +4137,13 @@
       const triedSlots = triedByItem.get(itemKey);
 
       const candidateSlots = slotEls.filter((s) => !triedSlots.has(s.text || s.id));
-      const poolSlots = candidateSlots.length > 0 ? candidateSlots : slotEls;
+      if (candidateSlots.length === 0) {
+        exhaustedItems.add(itemKey);
+        continue;
+      }
 
       let committed = false;
-      for (const slotMeta of poolSlots) {
+      for (const slotMeta of candidateSlots) {
         triedSlots.add(slotMeta.text || slotMeta.id);
         const slotEl = resolveElement(slotMeta.id);
         if (!slotEl || !itemEl.isConnected) break;
@@ -4097,7 +4154,7 @@
 
         const cStart = Date.now();
         let wasWrong = false;
-        while (Date.now() - cStart < 550) {
+        while (Date.now() - cStart < 600) {
           await sleep(40);
           if (!itemEl.isConnected || !isVisible(itemEl)) {
             committed = true;
@@ -4109,7 +4166,7 @@
             committed = true;
             break;
           }
-          if (iCls.includes("incorrect") || sCls.includes("incorrect")) {
+          if (iCls.includes("incorrect") || sCls.includes("incorrect") || iCls.includes("disabled")) {
             wasWrong = true;
             break;
           }
@@ -4121,9 +4178,12 @@
           break;
         }
         if (wasWrong) {
-          await sleep(220);
-          await waitUntilUnlocked(1200);
+          await sleep(260);
+          await waitUntilUnlocked(2400);
         }
+      }
+      if (!committed && triedSlots.size >= slotEls.length) {
+        exhaustedItems.add(itemKey);
       }
     }
 
@@ -4147,28 +4207,61 @@
     const matched = [];
     const triedPairs = new Set();
 
+    // Only .correct or detached/hidden means matched; .disabled alone is a temporary wrong-pair cooldown!
     const isCardDone = (el) => {
       if (!el || !el.isConnected || !isVisible(el)) return true;
       const cls = getClassName(el).toLowerCase();
       const pCls = el.parentElement ? getClassName(el.parentElement).toLowerCase() : "";
-      return cls.includes("correct") || cls.includes("disabled") || pCls.includes("correct");
+      return cls.includes("correct") || pCls.includes("correct");
+    };
+    const isCardCoolingDown = (el) => {
+      if (!el || !el.isConnected || !isVisible(el)) return false;
+      const cls = getClassName(el).toLowerCase();
+      if (cls.includes("correct")) return false;
+      return cls.includes("disabled") || cls.includes("incorrect");
     };
 
     for (let guard = 0; guard < 36; guard++) {
-      await waitUntilUnlocked(1200);
+      await waitUntilUnlocked(2400);
       const st = inspectState();
       if (st.canProceed && !isCheckOrSubmitButton(st)) break;
 
-      const slotEls = st.elements.filter((e) => e.type === "drop_target" && !e.disabled);
-      const dragEls = st.elements.filter((e) => e.type === "draggable" && !e.disabled);
+      const allSlots = st.elements.filter((e) => e.type === "drop_target");
+      const allDrags = st.elements.filter((e) => e.type === "draggable");
+      const slotEls = allSlots.filter((e) => !e.disabled);
+      const dragEls = allDrags.filter((e) => !e.disabled);
+
+      // If cards are still in wrong-attempt cooldown, wait rather than exiting early
+      if (
+        (allSlots.length > 0 && (slotEls.length === 0 || dragEls.length === 0)) ||
+        (allSlots.length === 0 && allDrags.length >= 2 && dragEls.length < 2)
+      ) {
+        await sleep(300);
+        continue;
+      }
 
       // Case A: Left slots + right items
       if (slotEls.length > 0 && dragEls.length > 0) {
-        const activeSlots = slotEls.filter((s) => !isCardDone(resolveElement(s.id)));
-        const activeItems = dragEls.filter((i) => !isCardDone(resolveElement(i.id)));
-        if (activeSlots.length === 0 || activeItems.length === 0) break;
+        const activeSlots = slotEls.filter((s) => {
+          const dom = resolveElement(s.id);
+          return !isCardDone(dom) && !isCardCoolingDown(dom);
+        });
+        const activeItems = dragEls.filter((i) => {
+          const dom = resolveElement(i.id);
+          return !isCardDone(dom) && !isCardCoolingDown(dom);
+        });
+        if (activeSlots.length === 0 || activeItems.length === 0) {
+          const anyPending = allSlots.some((s) => !isCardDone(resolveElement(s.id)));
+          if (anyPending) {
+            await sleep(300);
+            continue;
+          }
+          break;
+        }
 
-        const leftMeta = activeSlots[0];
+        const leftMeta =
+          activeSlots.find((s) => activeItems.some((r) => !triedPairs.has(`${s.text}||${r.text}`))) ||
+          activeSlots[0];
         const leftEl = resolveElement(leftMeta.id);
         if (!leftEl) break;
 
@@ -4178,7 +4271,7 @@
         for (const rightMeta of pool) {
           triedPairs.add(`${leftMeta.text}||${rightMeta.text}`);
           const rightEl = resolveElement(rightMeta.id);
-          if (!rightEl || isCardDone(leftEl)) break;
+          if (!rightEl || isCardDone(leftEl) || isCardCoolingDown(leftEl)) break;
 
           await simulateClick(leftEl);
           await sleep(85);
@@ -4187,15 +4280,13 @@
           let paired = false;
           let wasWrong = false;
           const wStart = Date.now();
-          while (Date.now() - wStart < 520) {
+          while (Date.now() - wStart < 560) {
             await sleep(40);
             if (isCardDone(leftEl) || isCardDone(rightEl)) {
               paired = true;
               break;
             }
-            const lCls = getClassName(leftEl).toLowerCase();
-            const rCls = getClassName(rightEl).toLowerCase();
-            if (lCls.includes("incorrect") || rCls.includes("incorrect")) {
+            if (isCardCoolingDown(leftEl) || isCardCoolingDown(rightEl)) {
               wasWrong = true;
               break;
             }
@@ -4206,16 +4297,26 @@
             break;
           }
           if (wasWrong) {
-            await sleep(240);
-            await waitUntilUnlocked(1200);
+            await sleep(260);
+            await waitUntilUnlocked(2400);
           }
         }
         continue;
       }
 
       // Case B: Tap-to-match cards (no slots, all cards are draggables)
-      const activeCards = dragEls.filter((c) => !isCardDone(resolveElement(c.id)));
-      if (activeCards.length < 2) break;
+      const activeCards = dragEls.filter((c) => {
+        const dom = resolveElement(c.id);
+        return !isCardDone(dom) && !isCardCoolingDown(dom);
+      });
+      if (activeCards.length < 2) {
+        const anyPending = allDrags.filter((c) => !isCardDone(resolveElement(c.id))).length >= 2;
+        if (anyPending) {
+          await sleep(300);
+          continue;
+        }
+        break;
+      }
 
       const sug = suggestImageWordPairs(activeCards);
       if (sug && sug.pairs.length > 0 && guard === 0) {
@@ -4234,7 +4335,7 @@
         triedPairs.add(`${firstMeta.text}||${secondMeta.text}`);
         triedPairs.add(`${secondMeta.text}||${firstMeta.text}`);
         const secondEl = resolveElement(secondMeta.id);
-        if (!secondEl || isCardDone(firstEl)) break;
+        if (!secondEl || isCardDone(firstEl) || isCardCoolingDown(firstEl)) break;
 
         await simulateClick(firstEl);
         await sleep(85);
@@ -4243,16 +4344,13 @@
         let paired = false;
         let wasWrong = false;
         const wStart = Date.now();
-        while (Date.now() - wStart < 520) {
+        while (Date.now() - wStart < 560) {
           await sleep(40);
           if (isCardDone(firstEl) || isCardDone(secondEl)) {
             paired = true;
             break;
           }
-          if (
-            getClassName(firstEl).toLowerCase().includes("incorrect") ||
-            getClassName(secondEl).toLowerCase().includes("incorrect")
-          ) {
+          if (isCardCoolingDown(firstEl) || isCardCoolingDown(secondEl)) {
             wasWrong = true;
             break;
           }
@@ -4263,8 +4361,8 @@
           break;
         }
         if (wasWrong) {
-          await sleep(240);
-          await waitUntilUnlocked(1200);
+          await sleep(260);
+          await waitUntilUnlocked(2400);
         }
       }
     }
@@ -6235,19 +6333,7 @@
         const rawAmt = Number(cmd.amount);
         const mag = Number.isFinite(rawAmt) && rawAmt !== 0 ? Math.abs(rawAmt) : 400;
         const dy = cmd.direction === "up" ? -mag : rawAmt < 0 ? rawAmt : mag;
-        const docs = getAllDocs();
-        for (const doc of docs) {
-          const scrollables = doc.querySelectorAll(
-            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable']"
-          );
-          for (const el of scrollables) {
-            if (el.scrollHeight > el.clientHeight) {
-              el.scrollTop += dy;
-              el.dispatchEvent(new Event("scroll", { bubbles: true }));
-            }
-          }
-        }
-        window.scrollBy({ top: dy, behavior: "instant" });
+        scrollContainerElements(getAllDocs(), dy);
         return { success: true, message: `Scrolled ${dy}px` };
       }
       case "wait":
