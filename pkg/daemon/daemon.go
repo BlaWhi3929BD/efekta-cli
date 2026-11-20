@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,11 +11,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"efekta-cli/pkg/protocol"
@@ -52,13 +56,20 @@ func isAllowedEfektaTabURL(rawURL string) bool {
 // IsAllowedWSOrigin prevents malicious web pages (http:// / https://) from hijacking the local WebSocket.
 // Only browser extensions (chrome-extension://, moz-extension://, safari-web-extension://) or local tools with no Origin are allowed.
 func IsAllowedWSOrigin(origin string) bool {
+	origin = strings.TrimSpace(origin)
 	if origin == "" {
 		return true
 	}
-	lower := strings.ToLower(origin)
-	return strings.HasPrefix(lower, "chrome-extension://") ||
-		strings.HasPrefix(lower, "moz-extension://") ||
-		strings.HasPrefix(lower, "safari-web-extension://")
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "chrome-extension", "moz-extension", "safari-web-extension":
+		return true
+	default:
+		return false
+	}
 }
 
 // IsAllowedAPIRequest protects /api/exec against browser-based CSRF / SSRF attacks.
@@ -66,7 +77,7 @@ func IsAllowedAPIRequest(r *http.Request) bool {
 	if r.Header.Get("Origin") != "" {
 		return false
 	}
-	if secSite := r.Header.Get("Sec-Fetch-Site"); secSite != "" && secSite != "none" {
+	if secSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); secSite != "" && secSite != "none" {
 		return false
 	}
 	return r.Header.Get(ClientHeader) == ClientValue
@@ -91,21 +102,26 @@ type ClientSession struct {
 func (c *ClientSession) WriteJSONBytes(payload []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.conn.SetWriteDeadline(time.Time{})
+	_ = c.conn.SetWriteDeadline(time.Now().Add(15 * time.Second))
 	return c.conn.WriteMessage(websocket.TextMessage, payload)
+}
+
+type pendingRequest struct {
+	ch      chan protocol.Response
+	session *ClientSession
 }
 
 type Server struct {
 	mu          sync.Mutex
 	clients     map[*ClientSession]bool
-	pendingReqs map[string]chan protocol.Response
+	pendingReqs map[string]pendingRequest
 	reqCounter  uint64
 }
 
 func NewServer() *Server {
 	return &Server{
 		clients:     make(map[*ClientSession]bool),
-		pendingReqs: make(map[string]chan protocol.Response),
+		pendingReqs: make(map[string]pendingRequest),
 	}
 }
 
@@ -167,6 +183,19 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.clients, session)
+		for id, req := range s.pendingReqs {
+			if req.session == session {
+				delete(s.pendingReqs, id)
+				select {
+				case req.ch <- protocol.Response{
+					ID:      id,
+					Success: false,
+					Error:   "browser extension disconnected while executing command",
+				}:
+				default:
+				}
+			}
+		}
 		s.mu.Unlock()
 		conn.Close()
 		log.Printf("[daemon] Extension disconnected (%s)", conn.RemoteAddr())
@@ -202,9 +231,12 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if resp.ID != "" {
-			if ch, exists := s.pendingReqs[resp.ID]; exists {
+			if req, exists := s.pendingReqs[resp.ID]; exists && req.session == session {
 				delete(s.pendingReqs, resp.ID)
-				ch <- resp
+				select {
+				case req.ch <- resp:
+				default:
+				}
 			}
 		}
 		s.mu.Unlock()
@@ -213,6 +245,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 // SendCommand dispatches a command to the active browser extension and waits for response
 func (s *Server) SendCommand(cmd protocol.Command, timeout time.Duration) (*protocol.Response, error) {
+	return s.SendCommandContext(context.Background(), cmd, timeout)
+}
+
+// SendCommandContext dispatches a command to the active browser extension and waits for response or cancellation
+func (s *Server) SendCommandContext(ctx context.Context, cmd protocol.Command, timeout time.Duration) (*protocol.Response, error) {
 	client := s.selectActiveClient()
 	if client == nil {
 		return nil, fmt.Errorf("no browser extension connected. Load the extension/ folder in your browser and open https://learn.better.efekta.com")
@@ -223,7 +260,7 @@ func (s *Server) SendCommand(cmd protocol.Command, timeout time.Duration) (*prot
 		cmd.ID = s.nextID()
 	}
 	respChan := make(chan protocol.Response, 1)
-	s.pendingReqs[cmd.ID] = respChan
+	s.pendingReqs[cmd.ID] = pendingRequest{ch: respChan, session: client}
 	s.mu.Unlock()
 
 	payload, err := json.Marshal(cmd)
@@ -238,13 +275,22 @@ func (s *Server) SendCommand(cmd protocol.Command, timeout time.Duration) (*prot
 		s.mu.Lock()
 		delete(s.pendingReqs, cmd.ID)
 		s.mu.Unlock()
+		_ = client.conn.Close()
 		return nil, fmt.Errorf("write to browser extension failed: %w", err)
 	}
+
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
 	select {
 	case resp := <-respChan:
 		return &resp, nil
-	case <-time.After(timeout):
+	case <-ctx.Done():
+		s.mu.Lock()
+		delete(s.pendingReqs, cmd.ID)
+		s.mu.Unlock()
+		return nil, fmt.Errorf("request canceled while waiting for browser extension: %w", ctx.Err())
+	case <-timer.C:
 		s.mu.Lock()
 		delete(s.pendingReqs, cmd.ID)
 		s.mu.Unlock()
@@ -276,7 +322,7 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 
 	timeout := CommandTimeout(cmd)
 
-	resp, err := s.SendCommand(cmd, timeout)
+	resp, err := s.SendCommandContext(r.Context(), cmd, timeout)
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
 		_ = json.NewEncoder(w).Encode(protocol.Response{
@@ -295,16 +341,33 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Forbidden host", http.StatusForbidden)
 		return
 	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !IsAllowedWSOrigin(r.Header.Get("Origin")) {
+		http.Error(w, "Forbidden origin", http.StatusForbidden)
+		return
+	}
+	if secSite := strings.ToLower(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))); secSite != "" && secSite != "none" {
+		http.Error(w, "Forbidden cross-site request", http.StatusForbidden)
+		return
+	}
+
 	s.mu.Lock()
 	clientCount := len(s.clients)
-	hasEfektaTab := false
-	tabURL := ""
+	var bestWithTab *ClientSession
 	for c := range s.clients {
 		if c.hasEfektaTab {
-			hasEfektaTab = true
-			tabURL = c.tabURL
-			break
+			if bestWithTab == nil || c.lastSeen.After(bestWithTab.lastSeen) {
+				bestWithTab = c
+			}
 		}
+	}
+	hasEfektaTab := bestWithTab != nil
+	tabURL := ""
+	if bestWithTab != nil {
+		tabURL = bestWithTab.tabURL
 	}
 	s.mu.Unlock()
 
@@ -327,6 +390,20 @@ func GetPIDFilePath() string {
 	return filepath.Join(home, ".efekta-daemon.pid")
 }
 
+// GetLogFilePath returns a user-private path for daemon startup logs to avoid shared /tmp symlink races.
+func GetLogFilePath() string {
+	if cacheDir, err := os.UserCacheDir(); err == nil && cacheDir != "" {
+		dir := filepath.Join(cacheDir, "efekta")
+		if err := os.MkdirAll(dir, 0700); err == nil {
+			return filepath.Join(dir, "daemon.log")
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, ".efekta-daemon.log")
+	}
+	return filepath.Join(os.TempDir(), "efekta-daemon.log")
+}
+
 func WritePID() error {
 	return os.WriteFile(GetPIDFilePath(), []byte(strconv.Itoa(os.Getpid())), 0600)
 }
@@ -345,34 +422,74 @@ func (s *Server) NewMux() *http.ServeMux {
 	return mux
 }
 
+// closeAllClients closes all connected extension WebSockets during graceful shutdown
+func (s *Server) closeAllClients() {
+	s.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(s.clients))
+	for c := range s.clients {
+		conns = append(conns, c.conn)
+	}
+	s.mu.Unlock()
+	for _, conn := range conns {
+		_ = conn.Close()
+	}
+}
+
 // Run starts the daemon server listening for WS and HTTP
 func (s *Server) Run() error {
+	ln, err := net.Listen("tcp", "127.0.0.1:"+WsPort)
+	if err != nil {
+		return err
+	}
+
 	_ = WritePID()
 	defer RemovePID()
 
 	server := &http.Server{
-		Addr:    "127.0.0.1:" + WsPort,
-		Handler: s.NewMux(),
+		Addr:              "127.0.0.1:" + WsPort,
+		Handler:           s.NewMux(),
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	log.Printf("[daemon] Efekta Bridge Daemon v2.0 started on http://127.0.0.1:%s", WsPort)
-	return server.ListenAndServe()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	go func() {
+		<-sigCh
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		s.closeAllClients()
+		_ = server.Shutdown(ctx)
+	}()
+
+	log.Printf("[daemon] Efekta Bridge Daemon v3.0 started on http://127.0.0.1:%s", WsPort)
+	if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
 }
 
 // CommandTimeout returns how long the daemon waits for the browser extension to answer a command.
 // Long-running macros (dialogue, autopilot) legitimately take minutes: every avatar turn plays video and speech.
 func CommandTimeout(cmd protocol.Command) time.Duration {
-	switch cmd.Action {
-	case "dialogue", "autopilot":
+	switch strings.ToLower(cmd.Action) {
+	case "dialogue", "avatar", "autopilot", "auto":
 		return 300 * time.Second
+	case "speak", "say", "skip_speaking":
+		return 120 * time.Second
 	case "batch":
+		timeout := 60 * time.Second
 		for _, sub := range cmd.Commands {
-			if sub.Action == "dialogue" || sub.Action == "autopilot" {
+			switch strings.ToLower(sub.Action) {
+			case "dialogue", "avatar", "autopilot", "auto":
 				return 300 * time.Second
+			case "speak", "say", "skip_speaking":
+				timeout = 120 * time.Second
 			}
 		}
-		return 60 * time.Second
-	case "speak", "skip", "skip_speaking", "solve_choice", "wait", "next", "sort", "pair", "gaps", "essay", "sequence", "lesson":
+		return timeout
+	case "skip", "solve_choice", "wait", "sleep", "next", "ff", "sort", "pair", "match", "gaps", "fill", "essay", "write", "sequence", "lesson", "unit":
 		return 60 * time.Second
 	}
 	return 25 * time.Second

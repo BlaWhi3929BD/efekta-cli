@@ -34,6 +34,9 @@ func TestIsAllowedWSOrigin(t *testing.T) {
 		"http://localhost:3000",
 		"http://127.0.0.1:8080",
 		"null",
+		"chrome-extension://",
+		"chrome-extension://abcdef/path",
+		"moz-extension://user@id",
 	}
 	for _, orig := range blocked {
 		if IsAllowedWSOrigin(orig) {
@@ -248,12 +251,129 @@ func TestCommandTimeoutLongMacros(t *testing.T) {
 	if got := CommandTimeout(protocol.Command{Action: "autopilot"}); got < 300*time.Second {
 		t.Errorf("autopilot timeout too short: %v", got)
 	}
+	if got := CommandTimeout(protocol.Command{Action: "auto"}); got < 300*time.Second {
+		t.Errorf("auto alias timeout too short: %v", got)
+	}
+	if got := CommandTimeout(protocol.Command{Action: "speak"}); got != 120*time.Second {
+		t.Errorf("speak timeout should be 120s, got %v", got)
+	}
 	batch := protocol.Command{Action: "batch", Commands: []protocol.BatchSubCommand{{Action: "pick"}, {Action: "dialogue"}}}
 	if got := CommandTimeout(batch); got < 300*time.Second {
 		t.Errorf("batch with dialogue timeout too short: %v", got)
 	}
+	speakBatch := protocol.Command{Action: "batch", Commands: []protocol.BatchSubCommand{{Action: "speak"}, {Action: "next"}}}
+	if got := CommandTimeout(speakBatch); got != 120*time.Second {
+		t.Errorf("batch with speak timeout should be 120s, got %v", got)
+	}
 	if got := CommandTimeout(protocol.Command{Action: "status"}); got != 25*time.Second {
 		t.Errorf("status timeout should be 25s, got %v", got)
+	}
+}
+
+func TestPendingRequestFailsImmediatelyOnWSDisconnect(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv.NewMux())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	dialer := websocket.Dialer{NetDialContext: (&http.Transport{}).DialContext}
+	header := http.Header{}
+	header.Set("Origin", "chrome-extension://disconnecttest")
+	conn, _, err := dialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+
+	_ = conn.WriteJSON(protocol.Response{
+		Type:         "hello",
+		HasEfektaTab: true,
+		TabURL:       "https://learn.better.efekta.com/lesson/1",
+	})
+	time.Sleep(30 * time.Millisecond)
+
+	// Read the dispatched command and close the socket without answering
+	go func() {
+		var cmd protocol.Command
+		if err := conn.ReadJSON(&cmd); err == nil {
+			_ = conn.Close()
+		}
+	}()
+
+	start := time.Now()
+	resp, err := srv.SendCommand(protocol.Command{Action: "autopilot"}, 30*time.Second)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("expected structured failure response, got transport error: %v", err)
+	}
+	if resp.Success || !strings.Contains(resp.Error, "disconnected") {
+		t.Fatalf("expected disconnect error response, got: %+v", resp)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("expected immediate failure on disconnect, took %v", elapsed)
+	}
+}
+
+func TestSendCommandContextCancelCleansPending(t *testing.T) {
+	srv := NewServer()
+	ts := httptest.NewServer(srv.NewMux())
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http") + "/ws"
+	dialer := websocket.Dialer{NetDialContext: (&http.Transport{}).DialContext}
+	header := http.Header{}
+	header.Set("Origin", "chrome-extension://canceltest")
+	conn, _, err := dialer.Dial(wsURL, header)
+	if err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	_ = conn.WriteJSON(protocol.Response{Type: "hello", HasEfektaTab: true, TabURL: "https://learn.better.efekta.com/"})
+	time.Sleep(30 * time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+
+	_, err = srv.SendCommandContext(ctx, protocol.Command{Action: "status"}, 10*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("expected cancellation error, got: %v", err)
+	}
+
+	srv.mu.Lock()
+	remaining := len(srv.pendingReqs)
+	srv.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("expected 0 pendingReqs after cancel, got %d", remaining)
+	}
+}
+
+func TestHandleHealthMethodAndOriginProtection(t *testing.T) {
+	srv := NewServer()
+	mux := srv.NewMux()
+
+	// Valid GET without Origin
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8765/api/health", nil)
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", rec.Code)
+	}
+
+	// POST rejected
+	recPost := httptest.NewRecorder()
+	reqPost := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8765/api/health", nil)
+	mux.ServeHTTP(recPost, reqPost)
+	if recPost.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("expected 405 Method Not Allowed, got %d", recPost.Code)
+	}
+
+	// Web Origin rejected
+	recOrig := httptest.NewRecorder()
+	reqOrig := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:8765/api/health", nil)
+	reqOrig.Header.Set("Origin", "https://evil.com")
+	mux.ServeHTTP(recOrig, reqOrig)
+	if recOrig.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for web origin, got %d", recOrig.Code)
 	}
 }
 
