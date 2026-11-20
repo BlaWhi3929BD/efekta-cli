@@ -54,15 +54,24 @@
     return "";
   }
 
-  // Register frame with background service so commands can be routed directly to iframes
+  // Register frame with background service so commands can be routed directly to iframes,
+  // and send a lightweight 10s keepalive ping from HTTPS tabs so Firefox MV3 event page never stays asleep for 60s.
   try {
     const isTop = window === window.top;
-    chrome.runtime.sendMessage({
-      type: "FRAME_REGISTER",
-      url: sanitizeUrl(window.location.href),
-      isTop,
-      isLessonPlayer: !isTop && isStudyPlayerFrame()
-    });
+    const registerFrame = (type) => {
+      try {
+        chrome.runtime.sendMessage({
+          type,
+          url: sanitizeUrl(window.location.href),
+          isTop,
+          isLessonPlayer: !isTop && isStudyPlayerFrame()
+        });
+      } catch (_) {}
+    };
+    registerFrame("FRAME_REGISTER");
+    if (window.location && window.location.protocol === "https:" && typeof setInterval === "function") {
+      setInterval(() => registerFrame("FRAME_PING"), 10000);
+    }
   } catch (_) {}
 
   const elementRegistry = new Map();
@@ -2732,17 +2741,21 @@
   }
 
   // Fast-forward passive video/audio cleanly under Firefox & Chrome autoplay policies by muting before play(),
-  // with direct duration + timeupdate/ended fallback if playback is still blocked.
+  // waiting for network Range buffering if remote src is present, with direct duration + timeupdate/ended fallback.
   async function fastForwardPassiveMedia(docs) {
     docs = docs || getAllDocs();
     let count = 0;
+    let hasRemoteSrc = false;
     for (const doc of docs) {
       for (const v of Array.from(doc.querySelectorAll("video, audio"))) {
         try {
           if (isFinite(v.duration) && v.duration > 0 && !v.ended) {
+            if (v.currentSrc || v.getAttribute("src") || (v.querySelector && v.querySelector("source[src]"))) {
+              hasRemoteSrc = true;
+            }
             v.muted = true;
             v.defaultMuted = true;
-            v.currentTime = Math.max(0, v.duration - 0.15);
+            v.currentTime = Math.max(0, v.duration - 0.35);
             try {
               const p = v.play();
               if (p && typeof p.catch === "function") p.catch(() => {});
@@ -2754,8 +2767,9 @@
     }
     if (count === 0) return 0;
 
+    const maxWaitMs = hasRemoteSrc ? 2200 : 900;
     const waitStart = Date.now();
-    while (Date.now() - waitStart < 900) {
+    while (Date.now() - waitStart < maxWaitMs) {
       await sleep(80);
       const allEnded = docs.every((doc) =>
         Array.from(doc.querySelectorAll("video, audio")).every(
@@ -2897,22 +2911,26 @@
         }
       }
 
-      // Priority 1: Auto-unlock reading/presentation cards by scrolling .task-area / [cdkscrollable] to bottom
-      if (!st.canProceed && st.elements.some((e) => e.type === "next_btn" && e.disabled)) {
+      // Priority 1: Auto-unlock reading/presentation/intro cards by scrolling .task-area / [cdkscrollable] to bottom
+      if (!st.canProceed && !isInteractiveTask) {
         const docs = getAllDocs();
+        let scrolledAny = false;
         for (const doc of docs) {
           const scrollables = doc.querySelectorAll(
-            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable']"
+            ".task-area, [cdkscrollable], .tasks-scroll-internal, .scrollable-panel, [class*='scrollable'], .content"
           );
           for (const el of scrollables) {
             if (el.scrollHeight > el.clientHeight + 10) {
               el.scrollTop = el.scrollHeight;
               el.dispatchEvent(new Event("scroll", { bubbles: true }));
+              scrolledAny = true;
             }
           }
         }
-        await sleep(150);
-        st = inspectState();
+        if (scrolledAny) {
+          await sleep(150);
+          st = inspectState();
+        }
       }
 
       // Priority 1: Active Next / Start next step / Continue / Back to lesson overview button
@@ -2973,26 +2991,14 @@
         }
       }
 
-      // Priority 4: Activity Navigator caterpillar circle (e.g. act-5/act-6 when activity needs unlocking)
-      if (!clickedTarget) {
-        const docs = getAllDocs();
-        for (const doc of docs) {
-          const catItems = Array.from(doc.querySelectorAll("ef-circular-progress .wp, .segment-wp .wp")).filter(isVisible);
-          if (catItems.length > 0) {
-            const canPass = catItems.find((c) => c.querySelector(".can-pass, .summary"));
-            if (canPass) {
-              await simulateClick(canPass);
-              await sleep(250);
-              const retrySt = inspectState();
-              if (retrySt.canProceed && retrySt.nextButtonId) {
-                const btn = resolveElement(retrySt.nextButtonId);
-                if (btn) {
-                  await simulateClick(btn);
-                  clickedTarget = "cat-progress-advance";
-                  break;
-                }
-              }
-            }
+      // Priority 4: Step Summary pill when step is already passable (never click arbitrary .can-pass pills backwards!)
+      if (!clickedTarget && !isInteractiveTask) {
+        const plan = analyzeStepActivities(st);
+        if (plan && plan.stepAlreadyPassable && plan.summaryEl) {
+          const sumDom = resolveElement(plan.summaryEl.id);
+          if (sumDom) {
+            await simulateClick(sumDom);
+            clickedTarget = plan.summaryEl.id;
           }
         }
       }
@@ -4358,7 +4364,7 @@
     }
 
     let moves = 0;
-    for (let round = 0; round < 18; round++) {
+    for (let round = 0; round < 28; round++) {
       await waitUntilUnlocked(1200);
       const st = inspectState();
       if (st.canProceed && !isCheckOrSubmitButton(st)) {
@@ -4383,12 +4389,20 @@
       const curTopText = cleanText(items[firstUnlockedIdx]).toLowerCase();
       if (curTopText) triedAtPos.add(curTopText);
 
-      // Pick the first unlocked candidate below firstUnlockedIdx that hasn't been tried at firstUnlockedIdx yet
+      // Pick the first candidate below firstUnlockedIdx that hasn't been tried at firstUnlockedIdx yet
       let candIdx = -1;
       for (let k = firstUnlockedIdx + 1; k < items.length; k++) {
         if (isItemUnlocked(items[k]) && !triedAtPos.has(cleanText(items[k]).toLowerCase())) {
           candIdx = k;
           break;
+        }
+      }
+      if (candIdx === -1) {
+        for (let k = firstUnlockedIdx + 1; k < items.length; k++) {
+          if (!triedAtPos.has(cleanText(items[k]).toLowerCase())) {
+            candIdx = k;
+            break;
+          }
         }
       }
       if (candIdx === -1) {
@@ -4404,15 +4418,22 @@
       const candText = cleanText(items[candIdx]).toLowerCase();
       if (candText) triedAtPos.add(candText);
 
-      // Perform an exact transposition (swap) between firstUnlockedIdx and candIdx:
-      // 1) Drag candIdx up to firstUnlockedIdx (old firstUnlockedIdx shifts to firstUnlockedIdx + 1)
-      // 2) If candIdx > firstUnlockedIdx + 1, drag firstUnlockedIdx + 1 down to candIdx so all intermediate locked items stay in place!
+      // Perform an exact transposition (swap) ONLY when an intermediate item between firstUnlockedIdx and candIdx is locked;
+      // otherwise a single upward drag from candIdx to firstUnlockedIdx never disturbs locked items below candIdx!
+      let hasIntermediateLocked = false;
+      for (let m = firstUnlockedIdx + 1; m < candIdx; m++) {
+        if (!isItemUnlocked(items[m])) {
+          hasIntermediateLocked = true;
+          break;
+        }
+      }
+
       inspectState();
       const curItems1 = getSortItems();
       await simulateDragAndDrop(curItems1[candIdx], curItems1[firstUnlockedIdx]);
       moves++;
       await sleep(120);
-      if (candIdx > firstUnlockedIdx + 1) {
+      if (hasIntermediateLocked && candIdx > firstUnlockedIdx + 1) {
         inspectState();
         const curItems2 = getSortItems();
         if (curItems2[firstUnlockedIdx + 1] && curItems2[candIdx]) {
@@ -4474,10 +4495,16 @@
       }
       if (noteWords.includes(w)) push(w);
 
-      // Noun -> Verb derivations
+      // Noun -> Verb derivations (including plural -ations / -ments / -als)
+      if (w.endsWith("ations")) {
+        push(w.slice(0, -4) + "e"); // congratulations -> congratulate, negotiations -> negotiate
+        push(w.slice(0, -6)); // expectations -> expect
+        push(w.slice(0, -6) + "e"); // preparations -> prepare
+      }
       if (w.endsWith("ation")) {
+        push(w.slice(0, -3) + "e"); // evaluation -> evaluate, integration -> integrate, communication -> communicate
         push(w.slice(0, -5)); // resignation -> resign, information -> inform
-        push(w.slice(0, -5) + "e"); // evaluation -> evaluate, communication -> communicate
+        push(w.slice(0, -5) + "e"); // preparation -> prepare, organization -> organize
       }
       if (w.endsWith("ition")) {
         push(w.slice(0, -5) + "e");
@@ -4492,16 +4519,20 @@
         push(w.slice(0, -2) + "e"); // proposal -> propose, approval -> approve
         push(w.slice(0, -2));
       }
-      if (w.endsWith("ment")) {
-        push(w.slice(0, -4)); // agreement -> agree, improvement -> improve
+      if (w.endsWith("ments")) {
+        push(w.slice(0, -5));
       }
-      // Zero-derivation (start -> start, budget -> budget, promise -> promise)
+      if (w.endsWith("ment")) {
+        push(w.slice(0, -4)); // replacement -> replace, agreement -> agree
+      }
+      // Zero-derivation (start -> start, budget -> budget, promise -> promise, regret -> regret, doubt -> doubt, pressure -> pressure)
       push(w);
       // Verb -> Noun derivations
       if (w.endsWith("e")) {
         push(w.slice(0, -1) + "al"); // propose -> proposal
-        push(w.slice(0, -1) + "ation"); // evaluate -> evaluation
-        push(w + "ment"); // agree -> agreement
+        push(w.slice(0, -1) + "ation"); // evaluate -> evaluation, integrate -> integration
+        push(w.slice(0, -1) + "ations"); // congratulate -> congratulations
+        push(w + "ment"); // replace -> replacement, agree -> agreement
         if (w.endsWith("de")) push(w.slice(0, -2) + "sion"); // conclude -> conclusion
       } else {
         push(w + "ation"); // resign -> resignation
@@ -4531,12 +4562,22 @@
       if (row) {
         const inputCell = activeInput.closest && activeInput.closest("td, th");
         const cells = Array.from(row.querySelectorAll("td, th"));
-        for (const c of cells) {
-          if (c !== inputCell && !(c.querySelector && c.querySelector("input, textarea, [contenteditable='true']"))) {
-            const t = cleanText(c);
-            if (t) {
-              siblingWord = t;
-              break;
+        const inputCellIdx = inputCell ? cells.indexOf(inputCell) : -1;
+        // In 2-column (Verb | Noun) or 4-column (Verb | Noun | Verb | Noun) tables, cell i pairs with cell (i ^ 1)!
+        if (inputCellIdx !== -1 && cells[inputCellIdx ^ 1]) {
+          const pairedCell = cells[inputCellIdx ^ 1];
+          if (!(pairedCell.querySelector && pairedCell.querySelector("input, textarea, [contenteditable='true']"))) {
+            siblingWord = cleanText(pairedCell);
+          }
+        }
+        if (!siblingWord) {
+          for (const c of cells) {
+            if (c !== inputCell && !(c.querySelector && c.querySelector("input, textarea, [contenteditable='true']"))) {
+              const t = cleanText(c);
+              if (t) {
+                siblingWord = t;
+                break;
+              }
             }
           }
         }
@@ -4935,7 +4976,33 @@
 
       // 2. If no response options are visible yet, ensure avatar video is playing (Firefox autoplay fix!) and wait briefly
       if (opts.length === 0) {
-        if (media.hasVideo && media.paused && !media.ended) {
+        if (media.hasVideo && media.ended && emptyOptPolls >= 3) {
+          const plan = analyzeStepActivities(st);
+          if (plan && plan.items[0] && plan.items[0].pct >= 70) {
+            if (plan.summaryEl) {
+              const sumDom = resolveElement(plan.summaryEl.id);
+              if (sumDom) await simulateClick(sumDom);
+            }
+            return {
+              success: true,
+              finished: true,
+              message: `Dialogue finished (${plan.items[0].pct}% completed).`,
+              turns
+            };
+          }
+          // If clip ended at <70% without mounting options (e.g. premature synthetic ended), rewind clip to 0 and play muted!
+          for (const doc of getAllDocs()) {
+            doc.querySelectorAll("video").forEach((v) => {
+              try {
+                v.muted = true;
+                v.defaultMuted = true;
+                v.currentTime = 0;
+                const p = v.play();
+                if (p && typeof p.catch === "function") p.catch(() => {});
+              } catch (_) {}
+            });
+          }
+        } else if (media.hasVideo && media.paused && !media.ended) {
           for (const doc of getAllDocs()) {
             doc.querySelectorAll("video").forEach((v) => {
               try {
@@ -5348,7 +5415,7 @@
       ...extra
     });
 
-    for (let i = 0; i < maxSteps && Date.now() - t0 < 270000; i++) {
+    for (let i = 0; i < maxSteps && Date.now() - t0 < 150000; i++) {
       const st = inspectState();
       const actSig = ((st.agentHint && st.agentHint.activities) || []).join(",");
       const optSig = ((st.agentHint && st.agentHint.options) || []).join(",");
@@ -5577,6 +5644,23 @@
       }
 
       if (isInteractiveExercise(st)) {
+        // If this step already has >50% passed activities and a particular solver didn't finish in 1 try,
+        // jump directly to Step Summary to complete the step immediately!
+        if (
+          stepPlan &&
+          stepPlan.stepAlreadyPassable &&
+          stepPlan.summaryEl &&
+          !jumpedToActivities.has(stepPlan.summaryEl.id)
+        ) {
+          jumpedToActivities.add(stepPlan.summaryEl.id);
+          const sumEl = resolveElement(stepPlan.summaryEl.id);
+          if (sumEl) {
+            await simulateClick(sumEl);
+            await sleep(350);
+            steps.push(`step-planner: step already passable (${stepPlan.passedCount}/${stepPlan.total}), jumping to ${stepPlan.summaryEl.id}`);
+            continue;
+          }
+        }
         return finish({
           needsAgent: true,
           stoppedAt: t,
@@ -5598,6 +5682,20 @@
             steps.push(`next: ${n.message}`);
             (n.autoReadNotes || []).forEach((x) => notes.push(x));
             continue;
+          }
+          // If reading/presentation card didn't unlock Next, advance to the next activity pill in the step!
+          if (stepPlan && stepPlan.currentIdx >= 0 && stepPlan.currentIdx + 1 < stepPlan.items.length) {
+            const nextAct = stepPlan.items[stepPlan.currentIdx + 1];
+            if (nextAct && !jumpedToActivities.has(nextAct.id)) {
+              jumpedToActivities.add(nextAct.id);
+              const nextActEl = resolveElement(nextAct.id);
+              if (nextActEl) {
+                await simulateClick(nextActEl);
+                await sleep(350);
+                steps.push(`step-planner: advanced past locked card to ${nextAct.id}`);
+                continue;
+              }
+            }
           }
         }
 
@@ -5753,12 +5851,12 @@
       await sleep(500);
     }
 
-    // 3. We are on /gap/ui/self-study. Wait up to 3.5s for unit sections to load.
+    // 3. We are on /gap/ui/self-study. Wait up to 8s for unit sections to load past skeleton placeholders.
     let units = [];
     let testCard = null;
     let currentLevel = "";
     const loadStart = Date.now();
-    while (Date.now() - loadStart < 4000) {
+    while (Date.now() - loadStart < 8000) {
       const docs = getAllDocs();
       for (const doc of docs) {
         if (!currentLevel) {
@@ -5810,14 +5908,23 @@
                 (linkEl.parentElement?.getAttribute("data-id") || "").match(/lesson-card-(\d+)/);
               const lessonNum = lm ? parseInt(lm[1], 10) : lIdx + 1;
 
-              const isLocked =
+              const hasDisabledAttr =
                 linkEl.getAttribute("aria-disabled") === "true" ||
-                linkEl.classList.contains("cursor-not-allowed") ||
-                linkEl.querySelector("div[class*='rounded-full'], svg[data-icon='lock']") !== null;
+                linkEl.classList.contains("cursor-not-allowed");
+              const hasLockIcon =
+                linkEl.querySelector("svg[data-icon='lock'], [data-testid*='lock'], [aria-label*='locked' i]") !== null;
+              const isLocked = hasDisabledAttr || hasLockIcon;
+
+              // On Efekta Catalyst /self-study, completed lessons have an enabled card with a circular checkmark badge (div[class*='rounded-full'] svg)
+              const hasCompletedBadge =
+                !isLocked &&
+                linkEl.querySelector(
+                  "[data-icon='check'], .is-passed, .completed, div[class*='rounded-full'] svg, div[class*='rounded-full']"
+                ) !== null;
 
               const isCompleted =
+                hasCompletedBadge ||
                 (linkEl.innerText || "").includes("100%") ||
-                linkEl.querySelector("[data-icon='check'], .is-passed, .completed") !== null ||
                 aria.toLowerCase().includes("completed");
 
               const status = isCompleted ? "completed" : isLocked ? "locked" : "available";

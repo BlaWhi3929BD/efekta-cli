@@ -774,82 +774,88 @@ function connectDaemon() {
           return;
         }
 
-        let response;
-        if (action === "lesson") {
-          const lessonQuery = String(req.target || req.text || "next").trim().toLowerCase();
+        const runLessonAndBootstrapPlayer = async (lessonTarget) => {
+          const lessonQuery = String(lessonTarget || "next").trim().toLowerCase();
           if (lessonQuery === "close" || lessonQuery === "exit") {
             await ensureSelfStudyFromLessonView(tab);
-            response = {
+            return {
               success: true,
               message: "Closed lesson, returned to course overview"
             };
-          } else if (lessonQuery === "resume") {
-            response = await sendMessageToTabWithRetry(tab.id, req);
-          } else {
-            await ensureSelfStudyFromLessonView(tab);
-            response = await sendMessageToTopFrame(tab.id, req);
-            // When a lesson starts, the lesson player loads inside a cross-origin study.better.efekta.com iframe.
-            // Wait briefly for it to mount and return the real Step 1 state instead of empty top-frame state.
-            if (
-              response &&
-              response.success &&
-              response.lesson &&
-              lessonQuery !== "list" &&
-              lessonQuery !== "ls" &&
-              chrome.webNavigation &&
-              chrome.webNavigation.getAllFrames
-            ) {
-              let playerFrameId = null;
-              let authGatewaySeen = false;
-              const waitEnd = Date.now() + 8000;
-              while (Date.now() < waitEnd) {
-                const frames = await new Promise((resolve) =>
-                  chrome.webNavigation.getAllFrames({ tabId: tab.id }, resolve)
-                );
-                if (Array.isArray(frames)) {
-                  const player = frames.find((f) => f.frameId !== 0 && isStudyPlayerUrl(f.url));
-                  if (player) {
-                    playerFrameId = player.frameId;
-                    break;
-                  }
-                  if (frames.some((f) => isAuthGatewayUrl(f.url))) {
-                    authGatewaySeen = true;
-                  }
+          }
+          if (lessonQuery === "resume") {
+            return await sendMessageToTabWithRetry(tab.id, { action: "lesson", target: "resume" });
+          }
+
+          await ensureSelfStudyFromLessonView(tab);
+          const lResp = await sendMessageToTopFrame(tab.id, {
+            action: "lesson",
+            target: lessonTarget || "next"
+          });
+          if (
+            lResp &&
+            lResp.success &&
+            lResp.lesson &&
+            lessonQuery !== "list" &&
+            lessonQuery !== "ls" &&
+            chrome.webNavigation &&
+            chrome.webNavigation.getAllFrames
+          ) {
+            let playerFrameId = null;
+            let authGatewaySeen = false;
+            const waitEnd = Date.now() + 8000;
+            while (Date.now() < waitEnd) {
+              const frames = await new Promise((resolve) =>
+                chrome.webNavigation.getAllFrames({ tabId: tab.id }, resolve)
+              );
+              if (Array.isArray(frames)) {
+                const player = frames.find((f) => f.frameId !== 0 && isStudyPlayerUrl(f.url));
+                if (player) {
+                  playerFrameId = player.frameId;
+                  break;
                 }
-                await new Promise((r) => setTimeout(r, 300));
+                if (frames.some((f) => isAuthGatewayUrl(f.url))) {
+                  authGatewaySeen = true;
+                }
               }
-              if (playerFrameId !== null) {
-                await ensureContentScriptInjected(tab.id);
-                // Poll player frame until Angular bootstraps and renders elements (up to 5s)
-                let readyState = null;
-                const readyEnd = Date.now() + 5000;
-                while (Date.now() < readyEnd) {
-                  await new Promise((r) => setTimeout(r, 250));
-                  const stRes = await sendMsg(tab.id, { action: "status" }, { frameId: playerFrameId });
-                  if (stRes && stRes.success && stRes.data && stRes.data.elementsCount > 0) {
-                    tabActiveFrames.set(tab.id, playerFrameId);
-                    readyState = stRes.data;
-                    break;
-                  }
+              await new Promise((r) => setTimeout(r, 300));
+            }
+            if (playerFrameId !== null) {
+              await ensureContentScriptInjected(tab.id);
+              let readyState = null;
+              const readyEnd = Date.now() + 5000;
+              while (Date.now() < readyEnd) {
+                await new Promise((r) => setTimeout(r, 250));
+                const stRes = await sendMsg(tab.id, { action: "status" }, { frameId: playerFrameId });
+                if (stRes && stRes.success && stRes.data && stRes.data.elementsCount > 0) {
+                  tabActiveFrames.set(tab.id, playerFrameId);
+                  readyState = stRes.data;
+                  break;
                 }
-                const playerRes = await sendMessageToTabWithRetry(tab.id, { action: "next", amount: 4 });
-                if (playerRes && playerRes.data && (playerRes.data.elementsCount > 0 || !readyState)) {
-                  response.data = playerRes.data;
-                  response.autoAdvance = playerRes;
-                } else if (readyState) {
-                  response.data = readyState;
-                  response.autoAdvance = playerRes;
-                }
-              } else if (authGatewaySeen) {
-                const authUrl = await detectAuthGatewayOnlyFrame(tab.id);
-                const hv = buildHumanVerificationResponse(authUrl || "https://catalyst-enter.better.efekta.com/");
-                response.message =
-                  (response.message || "Started lesson") +
-                  " (human verification required in browser)";
-                response.data = hv.data;
               }
+              const playerRes = await sendMessageToTabWithRetry(tab.id, { action: "next", amount: 4 });
+              if (playerRes && playerRes.data && (playerRes.data.elementsCount > 0 || !readyState)) {
+                lResp.data = playerRes.data;
+                lResp.autoAdvance = playerRes;
+              } else if (readyState) {
+                lResp.data = readyState;
+                lResp.autoAdvance = playerRes;
+              }
+            } else if (authGatewaySeen) {
+              const authUrl = await detectAuthGatewayOnlyFrame(tab.id);
+              const hv = buildHumanVerificationResponse(authUrl || "https://catalyst-enter.better.efekta.com/");
+              lResp.message =
+                (lResp.message || "Started lesson") +
+                " (human verification required in browser)";
+              lResp.data = hv.data;
             }
           }
+          return lResp;
+        };
+
+        let response;
+        if (action === "lesson") {
+          response = await runLessonAndBootstrapPlayer(req.target || req.text || "next");
         } else if (
           action === "batch" &&
           Array.isArray(req.commands) &&
@@ -857,8 +863,32 @@ function connectDaemon() {
           String(req.commands[0].action || "").toLowerCase() === "lesson" &&
           String(req.commands[0].target || "").trim().toLowerCase() !== "resume"
         ) {
-          await ensureSelfStudyFromLessonView(tab);
-          response = await sendMessageToTopFrame(tab.id, req);
+          const firstSub = req.commands[0];
+          const lessonRes = await runLessonAndBootstrapPlayer(firstSub.target || firstSub.text || "next");
+          const restCmds = req.commands.slice(1);
+          if (!lessonRes || !lessonRes.success || restCmds.length === 0) {
+            response = {
+              success: !!(lessonRes && lessonRes.success),
+              message: "Executed 1 batch commands",
+              error: lessonRes && !lessonRes.success ? lessonRes.error : undefined,
+              results: [{ action: "lesson", target: firstSub.target, ...lessonRes }],
+              data: lessonRes ? lessonRes.data : undefined
+            };
+          } else {
+            const tailRes = await sendMessageToTabWithRetry(tab.id, {
+              action: "batch",
+              commands: restCmds
+            });
+            const tailResults = Array.isArray(tailRes && tailRes.results) ? tailRes.results : [];
+            const combinedResults = [{ action: "lesson", target: firstSub.target, ...lessonRes }, ...tailResults];
+            response = {
+              success: !!(tailRes && tailRes.success),
+              message: `Executed ${combinedResults.length} batch commands`,
+              error: tailRes && !tailRes.success ? tailRes.error : undefined,
+              results: combinedResults,
+              data: (tailRes && tailRes.data) || lessonRes.data
+            };
+          }
         } else {
           response = await sendMessageToTabWithRetry(tab.id, req);
         }
@@ -958,7 +988,7 @@ if (chrome.webNavigation && chrome.webNavigation.onCommitted) {
 
 // Handle messages from content scripts and popup
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg && msg.type === "FRAME_REGISTER" && sender && sender.tab) {
+  if (msg && (msg.type === "FRAME_REGISTER" || msg.type === "FRAME_PING") && sender && sender.tab) {
     let map = tabFrames.get(sender.tab.id);
     if (!map) {
       map = new Map();
@@ -972,6 +1002,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     if (msg.isLessonPlayer && frameId !== 0) {
       tabActiveFrames.set(sender.tab.id, frameId);
+    }
+    if (!ws || ws.readyState === WebSocket.CLOSED) {
+      connectDaemon();
     }
     return;
   }

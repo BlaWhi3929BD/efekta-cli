@@ -1955,3 +1955,74 @@ test("step activity planner jumps to incomplete activity on Step not passed and 
   assert.equal(res.success, true);
   assert.equal(jumpedToAct3, true);
 });
+
+test("4-column Verb/Noun table pairs cells by (idx ^ 1) and executeLesson('list') classifies circular checkmark cards as completed", async () => {
+  // 1. 4-column table (Verb | Noun | Verb | Noun) with plural -ations noun ("congratulations" -> "congratulate")
+  const h1 = loadContentHarness("https://lesson-player.study.better.efekta.com/?product=gap-b2s");
+  const tbl = new h1.FakeElement("table");
+  const nextBtn = new h1.FakeElement("button", { className: "next-task-button", text: "Next", disabled: true });
+  let solved = 0;
+
+  const tr = new h1.FakeElement("tr");
+  tr.appendChild(new h1.FakeElement("td", { text: "regret" }));
+  tr.appendChild(new h1.FakeElement("td", { text: "regret" }));
+  const td3 = new h1.FakeElement("td");
+  const gap = new h1.FakeElement("ef-gapfill-item");
+  const inp = new h1.FakeElement("input", { attrs: { type: "text" }, value: "" });
+  const btn = new h1.FakeElement("button", {
+    className: "typing-status",
+    text: "Check",
+    onclick() {
+      if ((inp.value || "").toLowerCase() === "congratulate") {
+        inp.remove();
+        btn.remove();
+        td3.appendText("congratulate");
+        solved++;
+        nextBtn.disabled = false;
+      }
+    }
+  });
+  gap.appendChild(inp);
+  gap.appendChild(btn);
+  td3.appendChild(gap);
+  tr.appendChild(td3);
+  tr.appendChild(new h1.FakeElement("td", { text: "congratulations" }));
+  tbl.appendChild(tr);
+  h1.doc.body.appendChild(tbl);
+  h1.doc.body.appendChild(nextBtn);
+
+  const r1 = await h1.dispatchCommand({ action: "solve_gaps" });
+  assert.equal(r1.success, true);
+  assert.equal(solved, 1);
+
+  // 2. executeLesson("list"): enabled card with div.rounded-full svg is completed (NOT locked!)
+  const h2 = loadContentHarness("https://learn.better.efekta.com/gap/ui/self-study");
+  const sec = new h2.FakeElement("div", { attrs: { "data-id": "selfStudy-level-view-list-section-unit-1" } });
+  sec.appendChild(new h2.FakeElement("h2", { attrs: { "data-id": "unit-1" }, text: "Meetings" }));
+
+  const doneCard = new h2.FakeElement("div", { attrs: { role: "link", "aria-label": "Lesson 1 of 4, Opening a meeting" } });
+  doneCard.appendChild(new h2.FakeElement("h3", { attrs: { "data-id": "u1l1-title" }, text: "Opening a meeting" }));
+  const badge = new h2.FakeElement("div", { className: "rounded-full bg-green" });
+  badge.appendChild(new h2.FakeElement("svg"));
+  doneCard.appendChild(badge);
+  sec.appendChild(doneCard);
+
+  const lockedCard = new h2.FakeElement("div", {
+    className: "cursor-not-allowed",
+    attrs: { role: "link", "aria-disabled": "true", "aria-label": "Lesson 2 of 4, Locked lesson" }
+  });
+  lockedCard.appendChild(new h2.FakeElement("h3", { attrs: { "data-id": "u1l2-title" }, text: "Locked lesson" }));
+  lockedCard.appendChild(new h2.FakeElement("div", { className: "rounded-full" }));
+  sec.appendChild(lockedCard);
+  h2.doc.body.appendChild(sec);
+
+  const listRes = await h2.dispatchCommand({ action: "lesson", target: "list" });
+  assert.equal(listRes.success, true);
+  const lessons = listRes.data.units[0].lessons;
+  assert.equal(lessons[0].status, "completed");
+  assert.equal(lessons[0].completed, true);
+  assert.equal(lessons[0].locked, false);
+  assert.equal(lessons[1].status, "locked");
+  assert.equal(lessons[1].locked, true);
+  assert.equal(lessons[1].completed, false);
+});
