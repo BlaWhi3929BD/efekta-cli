@@ -311,14 +311,34 @@ func printAgentGuide() {
   efekta lesson close --json -c      # Exit active lesson back to course overview`)
 }
 
+func isKnownFlag(arg string) bool {
+	return arg == "--json" || arg == "--compact" || arg == "-c" || arg == "-o" || arg == "--output"
+}
+
+func parseOutputFlag(args []string) (string, error) {
+	outputPath := "screenshot.png"
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-o" || args[i] == "--output" {
+			if i+1 >= len(args) || isKnownFlag(args[i+1]) || strings.TrimSpace(args[i+1]) == "" {
+				return "", fmt.Errorf("flag %s requires an output file path", args[i])
+			}
+			outputPath = args[i+1]
+			break
+		}
+	}
+	return outputPath, nil
+}
+
 func stripFlags(args []string) []string {
 	var clean []string
 	for i := 0; i < len(args); i++ {
 		if args[i] == "--json" || args[i] == "--compact" || args[i] == "-c" {
 			continue
 		}
-		if (args[i] == "-o" || args[i] == "--output") && i+1 < len(args) {
-			i++
+		if args[i] == "-o" || args[i] == "--output" {
+			if i+1 < len(args) && !isKnownFlag(args[i+1]) {
+				i++
+			}
 			continue
 		}
 		clean = append(clean, args[i])
@@ -602,16 +622,10 @@ func main() {
 		handleSimpleResponse(resp, err, jsonOutput)
 
 	case "screen", "screenshot":
-		outputPath := "screenshot.png"
-		for i := 1; i < len(os.Args); i++ {
-			if os.Args[i] == "-o" || os.Args[i] == "--output" {
-				if i+1 >= len(os.Args) {
-					outputError(fmt.Errorf("flag %s requires an output file path", os.Args[i]), jsonOutput)
-					os.Exit(1)
-				}
-				outputPath = os.Args[i+1]
-				break
-			}
+		outputPath, flagErr := parseOutputFlag(os.Args[1:])
+		if flagErr != nil {
+			outputError(flagErr, jsonOutput)
+			os.Exit(1)
 		}
 		resp, err := execCommand(protocol.Command{Action: "screenshot"})
 		if err != nil {

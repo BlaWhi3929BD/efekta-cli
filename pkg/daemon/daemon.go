@@ -442,7 +442,9 @@ func (s *Server) Run() error {
 		return err
 	}
 
-	_ = WritePID()
+	if err := WritePID(); err != nil {
+		log.Printf("[daemon] Warning: failed to write PID file %s: %v", GetPIDFilePath(), err)
+	}
 	defer RemovePID()
 
 	server := &http.Server{

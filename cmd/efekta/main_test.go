@@ -181,3 +181,15 @@ func TestSendCommandHTTPReportsHTTPErrorStatus(t *testing.T) {
 		t.Fatalf("expected HTTP 403 error message, got: %v", err)
 	}
 }
+
+func TestParseOutputFlagRejectsMissingOrFlagPath(t *testing.T) {
+	if p, err := parseOutputFlag([]string{"screen", "-o", "out.png", "--json"}); err != nil || p != "out.png" {
+		t.Fatalf("expected out.png, got (%q, %v)", p, err)
+	}
+	if _, err := parseOutputFlag([]string{"screen", "-o", "--json"}); err == nil {
+		t.Error("expected error when -o is immediately followed by --json")
+	}
+	if _, err := parseOutputFlag([]string{"screen", "--output"}); err == nil {
+		t.Error("expected error when --output is missing a path")
+	}
+}
